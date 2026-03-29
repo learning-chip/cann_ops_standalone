@@ -45,18 +45,21 @@ def load_kernel(lib_path: str):
 
 
 def split_qk_for_mla(q: torch.Tensor, k: torch.Tensor, heads: int, kv_heads: int):
+    """Split nope/rope halves for MLA. Results must be contiguous: the kernel indexes GM with
+    row stride q_heads*128 / kv_heads*128 (see mla_prefill.cce stride_qo / stride_k). Slices of
+    the full [L, H*192] / [B,L,H*192] tensors have row stride 192 and would feed wrong rows to the kernel."""
     q_split1 = q[:, :128]
     q_split2 = q[:, 128:192]
     for i in range(1, heads):
-        q_split1 = torch.cat([q_split1, q[:, i * 192: i * 192 + 128]], dim=1)
-        q_split2 = torch.cat([q_split2, q[:, i * 192 + 128: (i + 1) * 192]], dim=1)
+        q_split1 = torch.cat([q_split1, q[:, i * 192 : i * 192 + 128]], dim=1)
+        q_split2 = torch.cat([q_split2, q[:, i * 192 + 128 : (i + 1) * 192]], dim=1)
 
     k_split1 = k[:, :, :, :128]
     k_split2 = k[:, :, :, 128:192]
     for i in range(1, kv_heads):
-        k_split1 = torch.cat([k_split1, k[:, :, :, i * 192: i * 192 + 128]], dim=3)
-        k_split2 = torch.cat([k_split2, k[:, :, :, i * 192 + 128: (i + 1) * 192]], dim=3)
-    return q_split1, q_split2, k_split1, k_split2
+        k_split1 = torch.cat([k_split1, k[:, :, :, i * 192 : i * 192 + 128]], dim=3)
+        k_split2 = torch.cat([k_split2, k[:, :, :, i * 192 + 128 : (i + 1) * 192]], dim=3)
+    return q_split1.contiguous(), q_split2.contiguous(), k_split1.contiguous(), k_split2.contiguous()
 
 
 def _split_u64(v: int):
@@ -134,6 +137,7 @@ def make_prefill_tiling(
         tiling[base + 13] = total_q_blk_num
         tiling[base + 14] = 1
 
+        # Match GetMLAPrefillTilingParam / PrefillTilingParam (embeddingSizeV for Q/K/V packed strides).
         addr_q += q_seqlen * q_heads * embdv
         addr_k += kv_seqlen * kv_heads * embdv
         addr_v += kv_seqlen * kv_heads * embdv
@@ -222,7 +226,7 @@ def run_smoke():
         as_ptr(q_split2),
         as_ptr(k_split1[0]),
         as_ptr(k_split2[0]),
-        as_ptr(v[0]),
+        as_ptr(v[0].contiguous()),
         as_ptr(mask),
         as_ptr(alibi),
         as_ptr(deq_qk),
@@ -240,22 +244,27 @@ def run_smoke():
     )
     torch.npu.synchronize()
 
-    # Simple reference for this 1-head mask-free smoke case.
-    q_ref = q.view(max_seq, heads, embd).permute(1, 0, 2)[0]
-    k_ref = k[0, 0].view(max_seq, kv_heads, embd).permute(1, 0, 2)[0]
-    v_ref = v[0, 0].view(max_seq, kv_heads, embdv).permute(1, 0, 2)[0]
-    score = (q_ref @ k_ref.transpose(0, 1)) * tor
-    p_ref = torch.softmax(score.to(torch.float32), dim=-1).to(dtype)
-    o_ref = (p_ref @ v_ref).contiguous()
-    o_ref = o_ref.view(max_seq, embdv)
+    # Torch reference: same math as fused split matmul; SDPA matches float32 softmax + matmul path here.
+    scale = 1.0 / math.sqrt(float(embd))
+    q_bmh = q.view(1, max_seq, heads, embd).transpose(1, 2)
+    k_bmh = k[0].view(1, max_seq, kv_heads, embd).transpose(1, 2)
+    v_bmh = v[0].view(1, max_seq, kv_heads, embdv).transpose(1, 2)
+    o_ref = torch.nn.functional.scaled_dot_product_attention(
+        q_bmh, k_bmh, v_bmh, attn_mask=None, dropout_p=0.0, is_causal=False, scale=scale
+    )
+    o_ref = o_ref.transpose(1, 2).contiguous().view(q_tokens, heads * embdv)
 
     changed = bool(torch.any(o != o_before).item())
-    diff = torch.mean(torch.abs(o - o_ref))
+    diff = torch.mean(torch.abs(o.float() - o_ref.float()))
+    max_diff = torch.max(torch.abs(o.float() - o_ref.float())).item()
+    # fp16 attention vs SDPA: allow small numerical gap (kernel uses fused online softmax).
+    torch.testing.assert_close(o, o_ref, rtol=5e-3, atol=5e-3, msg="mla_prefill output vs torch SDPA")
     print("mla_prefill call finished.")
     print(f"output mean abs: {o.abs().mean().item():.6f}")
     print(f"output finite: {bool(torch.isfinite(o).all().item())}")
     print(f"output changed: {changed}")
     print(f"mean abs diff vs ref: {diff.item():.6f}")
+    print(f"max abs diff vs ref: {max_diff:.6f}")
     print(f"tor example: {tor:.6f}")
 
 
