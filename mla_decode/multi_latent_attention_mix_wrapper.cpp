@@ -1,4 +1,3 @@
-#include "kernel_operator.h"
 #include "runtime/rt.h"
 #include "multi_latent_attention_mix.cce"
 
