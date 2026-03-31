@@ -10,11 +10,10 @@ bisheng \
     -I"/usr/local/Ascend/cann-8.5.0/aarch64-linux/asc" \
     -I"/usr/local/Ascend/cann-8.5.0/aarch64-linux/asc/include" \
     -I"/usr/local/Ascend/cann-8.5.0/aarch64-linux/asc/include/basic_api" \
-    -I"/usr/local/Ascend/cann-8.5.0/aarch64-linux/asc/impl" \
     -I"/usr/local/Ascend/cann-8.5.0/aarch64-linux/asc/impl/basic_api" \
     -I"${ASCEND_TOOLKIT_HOME}/include" \
     -I"${ASCEND_TOOLKIT_HOME}/pkg_inc" \
     -I"${ASCEND_TOOLKIT_HOME}/pkg_inc/runtime" \
     -I"${ASCEND_TOOLKIT_HOME}/pkg_inc/profiling" \
-    "${SCRIPT_DIR}/mla_prefill_wrapper.cpp" \
+    "${SCRIPT_DIR}/mla_prefill.cce" \
     -o "${SCRIPT_DIR}/mla_prefill_lib.so"

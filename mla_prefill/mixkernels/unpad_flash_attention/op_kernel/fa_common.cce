@@ -994,7 +994,7 @@ struct OnlineSoftmaxStage1Step1<MaskType::MASK_TYPE_CAUSAL_MASK>{
     // *** ls = ls + mask
     uint32_t s_mask_blk_start = (n_real - 1) / pp_n_scalar * pp_n_scalar;
     uint32_t mask_offset = 0;
-    if (GetSubBlockidx() == 1) {
+    if (get_subblockid() == 1) {
         uint32_t sub_m1_d8 = sub_m1 / FLOAT_BLOCK_SIZE * FLOAT_BLOCK_SIZE;
         s_mask_blk_start += sub_m1_d8;
         mask_offset = (sub_m1 - sub_m1_d8) * ROW_OPS_SPEC_MASK_32;

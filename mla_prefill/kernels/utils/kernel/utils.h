@@ -10,61 +10,11 @@
 #ifndef INCLUDE_UTILS_H
 #define INCLUDE_UTILS_H
 
-__aicore__ inline void SetFftsBaseAddr(uint64_t config)
-{
-    set_ffts_base_addr(config);
-}
-
-template <typename IN_DTYPE>
-__aicore__ inline void SetPadding(IN_DTYPE padValue)
-{
-    if constexpr (sizeof(IN_DTYPE) == 8) {
-        set_padding(static_cast<uint64_t>(padValue));
-    } else if constexpr (sizeof(IN_DTYPE) == 4) {
-        set_padding(static_cast<uint32_t>(padValue));
-    } else if constexpr (sizeof(IN_DTYPE) == 2) {
-        set_padding(static_cast<uint16_t>(padValue));
-    } else {
-        set_padding(static_cast<uint8_t>(padValue));
-    }
-}
-
-__aicore__ inline void SetAtomicnone()
-{
-    set_atomic_none();
-}
-
-__aicore__ inline void SetMasknorm()
-{
-#if __CCE_AICORE__ == 100
-    return;
-#endif
-    set_mask_norm();
-}
-
-__aicore__ inline void SetNdpara(uint16_t ndNum, uint16_t srcNdStride, uint16_t dstNdStride)
-{
-    uint64_t config = static_cast<uint64_t>(ndNum);
-    config |= static_cast<uint64_t>(srcNdStride) << 16;
-    config |= static_cast<uint64_t>(dstNdStride) << 32;
-    set_nd_para(config);
-}
-
 template <typename IN_DTYPE>
 __aicore__ inline void SetVectorMask(const uint64_t maskHigh, const uint64_t maskLow)
 {
     (void)sizeof(IN_DTYPE);
     set_vector_mask(maskHigh, maskLow);
-}
-
-__aicore__ inline int64_t GetSubBlockidx()
-{
-    return get_subblockid();
-}
-
-__aicore__ inline void WaitFlagDev(uint16_t flagId)
-{
-    wait_flag_dev(flagId);
 }
 
 template <pipe_t pipe, uint8_t mode>

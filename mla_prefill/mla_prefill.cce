@@ -61,6 +61,16 @@ struct LocalTensorView {
 };
 
 template <typename T>
+__aicore__ __attribute__((always_inline)) inline void gm_to_ub_raw(
+    const LocalTensorView<T> &dst, __gm__ T *src, uint32_t n_burst, uint32_t len_burst);
+
+template <typename T>
+__aicore__ __attribute__((always_inline)) inline void ub_to_gm_raw(
+    __gm__ T *dst, const LocalTensorView<T> &src, uint32_t n_burst, uint32_t len_burst);
+
+#include "mixkernels/unpad_flash_attention/op_kernel/fa_common.cce"
+
+template <typename T>
 struct RawAddrTensorView {
     uint64_t addr{0};
     __aicore__ RawAddrTensorView() = default;
@@ -138,8 +148,6 @@ __aicore__ __attribute__((always_inline)) inline void ub_to_gm_raw(
 {
     copy_ubuf_to_gm(dst, (__ubuf__ T *)(src.GetPhyAddr()), 0, n_burst, len_burst, 0, 0);
 }
-
-#include "mixkernels/unpad_flash_attention/op_kernel/fa_common.cce"
 
 #ifdef __DAV_C220_CUBE__
 constexpr int32_t BLOCK_SIZE = 16;
@@ -254,11 +262,11 @@ public:
         q_gm(q_gm), q_rope_gm(q_rope_gm), s_gm(s_gm), p_gm(p_gm), o_gm(o_gm), o_tmp_gm(o_tmp_gm), upo_tmp_gm(upo_tmp_gm),
         tiling_para_gm(tiling_para_gm)
     {
-        SetFftsBaseAddr((unsigned long)sync);
-        SetPadding<uint64_t>(0);
-        SetAtomicnone();
-        SetNdpara(1, 0, 0);
-        SetMasknorm();
+        set_ffts_base_addr((unsigned long)sync);
+        set_padding((uint64_t)0);
+        set_atomic_none();
+        set_nd_para((uint64_t)1);
+        set_mask_norm();
 
         this->batch_size = (uint32_t)(*((__gm__ int32_t *)tiling_para_gm));
         this->max_seqlen = (uint32_t)(*((__gm__ int32_t *)tiling_para_gm + 1));
@@ -612,7 +620,7 @@ public:
                         sv_round_n);
                     v_offset += sv_n * stride_v;
 
-                    WaitFlagDev(SOFTMAX_READY);
+                    wait_flag_dev(SOFTMAX_READY);
                     for (uint32_t gm_split_idx = 0; gm_split_idx < m_inner_loop; gm_split_idx++) {
                         WAIT_FLAG(FIX, M, l0c_pingpong_flag);
                         bool m_last_split = gm_split_idx == m_inner_loop - 1;
@@ -1145,12 +1153,12 @@ public:
           tiling_para_gm(tiling_para_gm), deq_qk_gm(deq_qk_gm), off_qk_gm(off_qk_gm), quant_p_gm(quant_p_gm),
           deq_pv_gm(deq_pv_gm), off_pv_gm(off_pv_gm), logN_gm(logN_gm)
     {
-        SetFftsBaseAddr((unsigned long)sync);
-        SetAtomicnone();
-        SetMasknorm();
+        set_ffts_base_addr((unsigned long)sync);
+        set_atomic_none();
+        set_mask_norm();
         SetVectorMask<int8_t>((uint64_t)-1, (uint64_t)-1);
 
-        this->sub_block_idx = GetSubBlockidx();
+        this->sub_block_idx = get_subblockid();
         this->batch_size = (uint32_t)(*((__gm__ int32_t *)tiling_para_gm));
         this->max_seqlen = (uint32_t)(*((__gm__ int32_t *)tiling_para_gm + 1));
         this->q_heads = (uint32_t)(*((__gm__ int32_t *)tiling_para_gm + 2));
@@ -1309,7 +1317,7 @@ public:
             for (uint32_t n_idx = n_start; n_idx < n_end + launch_delay; n_idx += S_BLOCK_STACK) {
                 if (n_idx < n_end) {
                     if (sub_m == 0) {
-                        WaitFlagDev(QK_READY);
+                        wait_flag_dev(QK_READY);
                         FftsCrossCoreSync<PIPE_MTE3, 2>(SOFTMAX_READY);
                     } else {
                     uint32_t p_scale_offset = n_idx / S_BLOCK_STACK % pv_stage * pp_m_scalar;
@@ -1367,7 +1375,7 @@ public:
                             }
                         }
                         if (m_ind == 0) {
-                            WaitFlagDev(QK_READY);
+                            wait_flag_dev(QK_READY);
                         }
                         if (curr_m == 0) {
                             continue;
@@ -1402,7 +1410,7 @@ public:
                 if (n_idx >= launch_delay + n_start) {
                     uint32_t qk_round_k = 128;
                     if (sub_m == 0) {
-                        WaitFlagDev(UPDATE_READY); // 4
+                        wait_flag_dev(UPDATE_READY); // 4
                         continue;
                     }
                     uint32_t p_scale_offset = (n_idx - launch_delay) / S_BLOCK_STACK % pv_stage * pp_m_scalar;
@@ -1451,7 +1459,7 @@ public:
                         }
                         PIPE_BARRIER(V);
                     }
-                    WaitFlagDev(UPDATE_READY); // 4
+                    wait_flag_dev(UPDATE_READY); // 4
                     // *** 更新 L 和 O
                     if (n_idx != launch_delay + n_start) {
                         for (uint32_t ms_idx = 0; ms_idx < loop_m; ms_idx++){
@@ -1599,10 +1607,7 @@ private:
     const uint32_t tv_ubuf_offset = 8 * UB_UINT8_BLOCK_SIZE + 9 * UB_UINT8_LINE_SIZE;
     const uint32_t p_scale_ubuf_offset = 8 * UB_UINT8_BLOCK_SIZE + 21 * UB_UINT8_LINE_SIZE;
     const uint32_t dm16_ubuf_offset = 8 * UB_UINT8_BLOCK_SIZE + 21 * UB_UINT8_LINE_SIZE;
-    const uint32_t log_ubuf_offset = 8 * UB_UINT8_BLOCK_SIZE + 30 * UB_UINT8_LINE_SIZE;
-    const uint32_t log_ubuf_float_offset = 8 * UB_UINT8_BLOCK_SIZE + 30 * UB_UINT8_LINE_SIZE;
     const uint32_t lo_ubuf_offset = 9 * UB_UINT8_BLOCK_SIZE;
-    const uint32_t mask16_ubuf_offset = 11 * UB_UINT8_BLOCK_SIZE;
 
     AsdopsBuffer<ArchType::ASCEND_V220> buf;
     LocalTensorView<half> ls_ubuf_tensor = buf.GetBuffer<BufferType::ASCEND_UB, half>(ls_ubuf_offset);
@@ -1620,12 +1625,6 @@ private:
     LocalTensorView<half> tv16_ubuf_tensor = buf.GetBuffer<BufferType::ASCEND_UB, half>(tv_ubuf_offset);
     LocalTensorView<half> dm16_ubuf_tensor = buf.GetBuffer<BufferType::ASCEND_UB, half>(dm16_ubuf_offset);
     LocalTensorView<float> go_ubuf_tensor = buf.GetBuffer<BufferType::ASCEND_UB, float>(go_ubuf_offset);
-    LocalTensorView<IN_DATA_TYPE> mask16_ubuf_tensor = buf.GetBuffer<BufferType::ASCEND_UB, IN_DATA_TYPE>(mask16_ubuf_offset);
-
-    LocalTensorView<IN_DATA_TYPE> log_ubuf_tensor = buf.GetBuffer<BufferType::ASCEND_UB, IN_DATA_TYPE>(log_ubuf_offset);
-    LocalTensorView<float> log_ubuf_float_tensor = buf.GetBuffer<BufferType::ASCEND_UB, float>(log_ubuf_float_offset);
-
-
     uint32_t batch_size{0};
     uint32_t max_seqlen{0};
     uint32_t q_heads{0};
