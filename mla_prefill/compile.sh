@@ -7,9 +7,11 @@ bisheng \
     -fPIC -shared -xcce -O2 -std=c++17 \
     --npu-arch=dav-2201 \
     -I"${SCRIPT_DIR}" \
-    -I"${ASCEND_TOOLKIT_HOME}/compiler/tikcpp/tikcfw" \
-    -I"${ASCEND_TOOLKIT_HOME}/compiler/tikcpp/tikcfw/impl" \
-    -I"${ASCEND_TOOLKIT_HOME}/compiler/tikcpp/tikcfw/interface" \
+    -I"/usr/local/Ascend/cann-8.5.0/aarch64-linux/asc" \
+    -I"/usr/local/Ascend/cann-8.5.0/aarch64-linux/asc/include" \
+    -I"/usr/local/Ascend/cann-8.5.0/aarch64-linux/asc/include/basic_api" \
+    -I"/usr/local/Ascend/cann-8.5.0/aarch64-linux/asc/impl" \
+    -I"/usr/local/Ascend/cann-8.5.0/aarch64-linux/asc/impl/basic_api" \
     -I"${ASCEND_TOOLKIT_HOME}/include" \
     -I"${ASCEND_TOOLKIT_HOME}/pkg_inc" \
     -I"${ASCEND_TOOLKIT_HOME}/pkg_inc/runtime" \

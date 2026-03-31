@@ -13,7 +13,6 @@
 #include "kernels/utils/kernel/common_func.h"
 #include "kernels/utils/kernel/simd.h"
 #include "kernels/utils/kernel/iterator.h"
-#include "kernels/utils/kernel/mma.h"
 #include "kernels/utils/kernel/utils.h"
 #include "kernel_operator.h"
 

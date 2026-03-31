@@ -11,7 +11,6 @@
 #include "kernels/utils/kernel/common.h"
 #include "kernels/utils/kernel/common_func.h"
 #include "kernels/utils/kernel/simd.h"
-#include "kernels/utils/kernel/iterator.h"
 #include "kernels/utils/kernel/mma.h"
 #include "kernels/utils/kernel/utils.h"
 #include "kernel_operator.h"
@@ -45,6 +44,97 @@ constexpr int32_t S_BLOCK_STACK = 4;
 
 #ifdef __DAV_C220_CUBE__
 constexpr int32_t BLOCK_SIZE = 16;
+
+template <typename T>
+__aicore__ __attribute__((always_inline)) inline void gm_to_l1_nd_nd_raw(
+    __cbuf__ T *dst,
+    __gm__ T *src,
+    uint32_t elem_count)
+{
+    const uint32_t len_burst = (elem_count * sizeof(T) + 31) / 32;
+    copy_gm_to_cbuf(dst, src, 0, 1, len_burst, 0, 0, PAD_NONE);
+}
+
+template <typename T>
+__aicore__ __attribute__((always_inline)) inline void gm_to_l1_nd_nz_raw(
+    __cbuf__ T *dst,
+    __gm__ T *src,
+    uint32_t n_value,
+    uint32_t d_value,
+    uint32_t src_d_value,
+    uint32_t dst_nz_c0_stride)
+{
+    copy_gm_to_cbuf_multi_nd2nz_b16(
+        dst, src, 0, 1, n_value, d_value, 0, src_d_value, dst_nz_c0_stride, 1, 0);
+}
+
+template <typename T>
+__aicore__ __attribute__((always_inline)) inline void l1_to_l0a_vector_raw(
+    __ca__ T *dst,
+    __cbuf__ T *src,
+    uint32_t repeat,
+    uint32_t src_stride)
+{
+    load_cbuf_to_ca(dst, src, 0, repeat, src_stride, 0, 0, 0, inc);
+}
+
+template <typename T>
+__aicore__ __attribute__((always_inline)) inline void l1_to_l0a_nz_zz_raw(
+    __ca__ T *dst,
+    __cbuf__ T *src,
+    uint32_t m_tile_ceil,
+    uint32_t k_part_ceil)
+{
+    constexpr uint32_t ROW_BLOCK_SIZE = 16;
+    constexpr uint32_t FRACTAL_SIZE = 512 / sizeof(T);
+    constexpr uint32_t COL_BLOCK_SIZE = 32 / sizeof(T);
+    for (uint32_t i = 0; i < m_tile_ceil / ROW_BLOCK_SIZE; ++i) {
+        load_cbuf_to_ca(
+            dst + i * ROW_BLOCK_SIZE * k_part_ceil,
+            src + i * FRACTAL_SIZE,
+            0,
+            static_cast<uint16_t>(k_part_ceil / COL_BLOCK_SIZE),
+            m_tile_ceil / ROW_BLOCK_SIZE,
+            0,
+            0,
+            0,
+            inc);
+    }
+}
+
+template <typename T, bool TRANSPOSE>
+__aicore__ __attribute__((always_inline)) inline void l1_to_l0b_vector_raw(
+    __cb__ T *dst,
+    __cbuf__ T *src,
+    uint32_t repeat,
+    uint32_t src_stride)
+{
+    if constexpr (TRANSPOSE) {
+        load_cbuf_to_cb(dst, src, 0, repeat, src_stride, 0, 0, true, inc);
+    } else {
+        load_cbuf_to_cb(dst, src, 0, repeat, src_stride, 0, 0, false, inc);
+    }
+}
+
+template <typename OUT_T, typename IN_T>
+__aicore__ __attribute__((always_inline)) inline void l0c_to_gm_nd_raw(
+    __gm__ OUT_T *dst,
+    __cc__ IN_T *src,
+    uint32_t m_size,
+    uint32_t n_size,
+    uint32_t src_stride,
+    uint32_t dst_stride)
+{
+    // ND_PARA is required when emitting ND layout from L0C.
+    set_nd_para(1);
+    if constexpr (std::is_same<OUT_T, half>::value && std::is_same<IN_T, float>::value) {
+        copy_matrix_cc_to_gm(
+            dst, src, 0, n_size, m_size, dst_stride, src_stride, 0, QuantMode_t::F322F16, 0, 0, 1);
+    } else {
+        copy_matrix_cc_to_gm(
+            dst, src, 0, n_size, m_size, dst_stride, src_stride, 0, QuantMode_t::NoQuant, 0, 0, 1);
+    }
+}
 
 template<typename IN_DATA_TYPE, typename QKV_DT = IN_DATA_TYPE, typename O_DT = IN_DATA_TYPE, int32_t MASK_TYPE = 0>
 class FlashAttentionEncoder {
@@ -162,19 +252,17 @@ public:
     {
         uint32_t round_row = RoundUp<uint32_t>(round_k, 32 / sizeof(QKV_DT));
         if (qk_m == 1) {
-            l1_to_l0_a<ArchType::ASCEND_V220, QKV_DT, false, DataFormat::VECTOR, DataFormat::VECTOR>(
-                dst_tensor,
-                src_tensor,
-                0,
-                NumMatrixsRoundUp<QKV_DT>(round_row), // repeat
-                0,
-                1,                                                   // srcStride
-                0,
-                0                                                   // dstStride
-            );
+            l1_to_l0a_vector_raw<QKV_DT>(
+                (__ca__ QKV_DT *)dst_tensor.GetPhyAddr(),
+                (__cbuf__ QKV_DT *)src_tensor.GetPhyAddr(),
+                NumMatrixsRoundUp<QKV_DT>(round_row),
+                1);
         } else {
-            l1_to_l0_a<ArchType::ASCEND_V220, QKV_DT, false, DataFormat::NZ, DataFormat::ZZ>(
-                dst_tensor, src_tensor, qk_round_m, round_row, 0, 0, 0, 0);
+            l1_to_l0a_nz_zz_raw<QKV_DT>(
+                (__ca__ QKV_DT *)dst_tensor.GetPhyAddr(),
+                (__cbuf__ QKV_DT *)src_tensor.GetPhyAddr(),
+                qk_round_m,
+                round_row);
         }
     }
 
@@ -245,47 +333,29 @@ public:
 
             // Only need load Q once
             if (qk_m == 1) {
-                gm_to_l1<ArchType::ASCEND_V220, QKV_DT, DataFormat::ND, DataFormat::ND>(
-                    l1q_buf_addr_tensor,
-                    q_gm_tensor[q_offset],
-                    1,
-                    0,
-                    0,
-                    128,              // lenBurst
-                    0,
-                    0
-                );
-                gm_to_l1<ArchType::ASCEND_V220, QKV_DT, DataFormat::ND, DataFormat::ND>(
-                    l1q_buf_addr_tensor[16 * 128],
-                    q_rope_gm_tensor[q_rope_offset],
-                    1,
-                    0,
-                    0,
-                    64,              // lenBurst
-                    0,
-                    0
-                );
+                gm_to_l1_nd_nd_raw<QKV_DT>(
+                    (__cbuf__ QKV_DT *)l1q_buf_addr_tensor.GetPhyAddr(),
+                    ((__gm__ QKV_DT *)q_gm) + q_offset,
+                    128);
+                gm_to_l1_nd_nd_raw<QKV_DT>(
+                    (__cbuf__ QKV_DT *)l1q_buf_addr_tensor[16 * 128].GetPhyAddr(),
+                    ((__gm__ QKV_DT *)q_rope_gm) + q_rope_offset,
+                    64);
             } else {
-                gm_to_l1<ArchType::ASCEND_V220, QKV_DT, DataFormat::ND, DataFormat::NZ>(
-                    l1q_buf_addr_tensor,
-                    q_gm_tensor[q_offset],
-                    qk_m,       // nValue
-                    qk_round_m, // dstNzC0Stride
-                    0,
-                    128,        // dValue
-                    0,
-                    stride_qo  // srcDValue
-                );
-                gm_to_l1<ArchType::ASCEND_V220, QKV_DT, DataFormat::ND, DataFormat::NZ>(
-                    l1q_buf_addr_tensor[qk_round_m * 128],
-                    q_rope_gm_tensor[q_rope_offset],
-                    qk_m,       // nValue
-                    qk_round_m, // dstNzC0Stride
-                    0,
-                    64,        // dValue
-                    0,
-                    stride_qo / 2
-                );
+                gm_to_l1_nd_nz_raw<QKV_DT>(
+                    (__cbuf__ QKV_DT *)l1q_buf_addr_tensor.GetPhyAddr(),
+                    ((__gm__ QKV_DT *)q_gm) + q_offset,
+                    qk_m,
+                    128,
+                    stride_qo,
+                    qk_round_m);
+                gm_to_l1_nd_nz_raw<QKV_DT>(
+                    (__cbuf__ QKV_DT *)l1q_buf_addr_tensor[qk_round_m * 128].GetPhyAddr(),
+                    ((__gm__ QKV_DT *)q_rope_gm) + q_rope_offset,
+                    qk_m,
+                    64,
+                    stride_qo / 2,
+                    qk_round_m);
             }
             SET_FLAG(MTE2, MTE1, pingpong_flag);
             WAIT_FLAG(MTE2, MTE1, pingpong_flag);
@@ -350,26 +420,20 @@ public:
                         bool last_split = split_idx == S_BLOCK_STACK - 1 || n_idx + split_idx == n_end - 1;
 
                         WAIT_FLAG(MTE1, MTE2, pingpong_flag + 2 * kv_pingpong_flag);
-                        gm_to_l1<ArchType::ASCEND_V220, QKV_DT, DataFormat::ND, DataFormat::NZ>(
-                            l1k_buf_addr_tensor[kv_pingpong_offset + offset],
-                            k_gm_tensor[k_offset],
-                            qk_n,        // nValue
-                            qk_round_n,  // dstNzC0Stride
-                            0,            // dstNzMatrixStride, unused
-                            128,         // dValue
-                            0,            // dstNzMatrixStride, unused
-                            stride_k   // srcDValue
-                        );
-                        gm_to_l1<ArchType::ASCEND_V220, QKV_DT, DataFormat::ND, DataFormat::NZ>(
-                            l1k_buf_addr_tensor[kv_pingpong_offset + offset + qk_round_n * 128],
-                            k_rope_gm_tensor[k_rope_offset],
-                            qk_n,        // nValue
-                            qk_round_n,  // dstNzC0Stride
-                            0,            // dstNzMatrixStride, unused
-                            64,         // dValue
-                            0,            // dstNzMatrixStride, unused
-                            stride_k / 2   // srcDValue
-                        );
+                        gm_to_l1_nd_nz_raw<QKV_DT>(
+                            (__cbuf__ QKV_DT *)l1k_buf_addr_tensor[kv_pingpong_offset + offset].GetPhyAddr(),
+                            ((__gm__ QKV_DT *)k_gm) + k_offset,
+                            qk_n,
+                            128,
+                            stride_k,
+                            qk_round_n);
+                        gm_to_l1_nd_nz_raw<QKV_DT>(
+                            (__cbuf__ QKV_DT *)l1k_buf_addr_tensor[kv_pingpong_offset + offset + qk_round_n * 128].GetPhyAddr(),
+                            ((__gm__ QKV_DT *)k_rope_gm) + k_rope_offset,
+                            qk_n,
+                            64,
+                            stride_k / 2,
+                            qk_round_n);
                         SET_FLAG(MTE2, MTE1, pingpong_flag);
                         WAIT_FLAG(MTE2, MTE1, pingpong_flag);
                         for (int embed_idx = 0; embed_idx < loopQK; embed_idx++) {
@@ -378,16 +442,11 @@ public:
                             uint32_t initc = (embed_idx == 0) ? 1: 0;
                             uint32_t embed_flag = embed_idx % 2;
                             WAIT_FLAG(M, MTE1, embed_flag + 2);
-                            l1_to_l0_b<ArchType::ASCEND_V220, QKV_DT, false, DataFormat::VECTOR, DataFormat::VECTOR>(
-                                l0b_buf_tensor[embed_flag * L0AB_HALF_BUF_SIZE],
-                                l1k_buf_addr_tensor[kv_pingpong_offset + offset + embed_idx * qk_round_n * 128],
-                                0,
-                                NumMatrixsRoundUp<QKV_DT>(RoundUp<uint32_t>(embedk, 32 / sizeof(QKV_DT)) * qk_round_n), // repeat
-                                0,
-                                1,                                        // srcStride
-                                0,
-                                0                                        // dstStride
-                            );
+                            l1_to_l0b_vector_raw<QKV_DT, false>(
+                                (__cb__ QKV_DT *)l0b_buf_tensor[embed_flag * L0AB_HALF_BUF_SIZE].GetPhyAddr(),
+                                (__cbuf__ QKV_DT *)l1k_buf_addr_tensor[kv_pingpong_offset + offset + embed_idx * qk_round_n * 128].GetPhyAddr(),
+                                NumMatrixsRoundUp<QKV_DT>(RoundUp<uint32_t>(embedk, 32 / sizeof(QKV_DT)) * qk_round_n),
+                                1);
 
                             if (last_embed_loop) {
                                 SET_FLAG(MTE1, MTE2, pingpong_flag + 2 * kv_pingpong_flag);
@@ -400,10 +459,10 @@ public:
                                 WAIT_FLAG(FIX, M, l0c_pingpong_flag);
                             }
 
-                            mmad<ArchType::ASCEND_V220, QKV_DT, QKV_DT, float, false>(
-                                l0c_buf_tensor[l0c_offset],
-                                l0a_buf_tensor[embed_idx * L0AB_HALF_BUF_SIZE],
-                                l0b_buf_tensor[embed_flag * L0AB_HALF_BUF_SIZE],
+                            mmad_raw<ArchType::ASCEND_V220, QKV_DT, QKV_DT, float, false>(
+                                (__cc__ float *)l0c_buf_tensor[l0c_offset].GetPhyAddr(),
+                                (__ca__ QKV_DT *)l0a_buf_tensor[embed_idx * L0AB_HALF_BUF_SIZE].GetPhyAddr(),
+                                (__cb__ QKV_DT *)l0b_buf_tensor[embed_flag * L0AB_HALF_BUF_SIZE].GetPhyAddr(),
                                 qk_m,  // m
                                 qk_n,  // n
                                 embedk,   // k
@@ -417,14 +476,15 @@ public:
                                 SET_FLAG(M, FIX, l0c_pingpong_flag);
                                 WAIT_FLAG(M, FIX, l0c_pingpong_flag);
 
-                                l0c_to_gm<ArchType::ASCEND_V220, DataFormat::ND, half, float>(
-                                    s_gm_tensor[(uint64_t)block_idx * TMP_SIZE + (n_idx - n_start) % vect_mod * TMP_SIZE / vect_mod + split_idx * pp_n_scalar],
-                                    l0c_buf_tensor[l0c_offset],
-                                    qk_m,        // MSize
-                                    qk_round_n,  // NSize
-                                    qk_round_m,  // srcStride
-                                    sv_round_n  // dstStride_dst_D
-                                );
+                                l0c_to_gm_nd_raw<half, float>(
+                                    (__gm__ half *)(s_gm + ((uint64_t)block_idx * TMP_SIZE +
+                                                            (n_idx - n_start) % vect_mod * TMP_SIZE / vect_mod +
+                                                            split_idx * pp_n_scalar) * sizeof(half)),
+                                    (__cc__ float *)l0c_buf_tensor[l0c_offset].GetPhyAddr(),
+                                    qk_m,
+                                    qk_round_n,
+                                    qk_round_m,
+                                    sv_round_n);
                                 SET_FLAG(FIX, M, l0c_pingpong_flag);
                             }
                         }
@@ -454,16 +514,13 @@ public:
                     uint32_t l1_split_loop = (sv_n + n_slice - 1) / n_slice;
                     WAIT_FLAG(MTE1, MTE2, kv_pingpong_flag * 2);
                     WAIT_FLAG(MTE1, MTE2, kv_pingpong_flag * 2 + 1);
-                    gm_to_l1<ArchType::ASCEND_V220, QKV_DT, DataFormat::ND, DataFormat::NZ>(
-                        l1v_buf_addr_tensor[kv_pingpong_offset],
-                        v_gm_tensor[v_offset],
-                        sv_n,       // nValue
-                        sv_round_n, // dstNzC0Stride
-                        0,          // dstNzMatrixStride, unused
-                        embdv,        // dValue
-                        0,          // dstNzMatrixStride, unused
-                        stride_v   // srcDValue
-                    );
+                    gm_to_l1_nd_nz_raw<QKV_DT>(
+                        (__cbuf__ QKV_DT *)l1v_buf_addr_tensor[kv_pingpong_offset].GetPhyAddr(),
+                        ((__gm__ QKV_DT *)v_gm) + v_offset,
+                        sv_n,
+                        embdv,
+                        stride_v,
+                        sv_round_n);
                     v_offset += sv_n * stride_v;
 
                     WaitFlagDev(SOFTMAX_READY);
@@ -481,26 +538,22 @@ public:
                             uint32_t d = l1_last_split ? sv_n - l1_k_split_idx * n_slice : n_slice;
                             WAIT_FLAG(MTE1, MTE2, l1_pingpong_flag + 4);
                             if (nowM == 1) {
-                                gm_to_l1<ArchType::ASCEND_V220, QKV_DT, DataFormat::ND, DataFormat::ND>(
-                                    l1p_buf_addr_tensor[l1_offset],
-                                    p_gm_tensor[((uint64_t)block_idx * TMP_SIZE +
-                                                (n_idx - launch_delay - n_start) % vect_mod * TMP_SIZE / vect_mod) *
-                                                2 / sizeof(QKV_DT) + l1_k_split_idx * n_slice + gm_p_offset],
-                                    1, 0, 0, RoundUp<uint64_t>(sv_round_n, BlockSize<QKV_DT>()), // lenBurst
-                                    0, 0);
+                                gm_to_l1_nd_nd_raw<QKV_DT>(
+                                    (__cbuf__ QKV_DT *)l1p_buf_addr_tensor[l1_offset].GetPhyAddr(),
+                                    ((__gm__ QKV_DT *)p_gm) + ((uint64_t)block_idx * TMP_SIZE +
+                                    (n_idx - launch_delay - n_start) % vect_mod * TMP_SIZE / vect_mod) *
+                                    2 / sizeof(QKV_DT) + l1_k_split_idx * n_slice + gm_p_offset,
+                                    RoundUp<uint64_t>(sv_round_n, BlockSize<QKV_DT>()));
                             } else {
-                                gm_to_l1<ArchType::ASCEND_V220, QKV_DT, DataFormat::ND, DataFormat::NZ>(
-                                    l1p_buf_addr_tensor[l1_offset],
-                                    p_gm_tensor[((uint64_t)block_idx * TMP_SIZE +
-                                                (n_idx - launch_delay - n_start) % vect_mod * TMP_SIZE / vect_mod) *
-                                                2 / sizeof(QKV_DT) + l1_k_split_idx * n_slice + gm_p_offset],
-                                    nowM,                           // nValue
-                                    nowMRound,                     // dstNzC0Stride
-                                    0,                              // dstNzMatrixStride, unused
-                                    d,                           // dValue
-                                    0,                              // dstNzMatrixStride, unused
-                                    sv_round_n * 2 / sizeof(QKV_DT) // srcDValue
-                                );
+                                gm_to_l1_nd_nz_raw<QKV_DT>(
+                                    (__cbuf__ QKV_DT *)l1p_buf_addr_tensor[l1_offset].GetPhyAddr(),
+                                    ((__gm__ QKV_DT *)p_gm) + ((uint64_t)block_idx * TMP_SIZE +
+                                    (n_idx - launch_delay - n_start) % vect_mod * TMP_SIZE / vect_mod) *
+                                    2 / sizeof(QKV_DT) + l1_k_split_idx * n_slice + gm_p_offset,
+                                    nowM,
+                                    d,
+                                    sv_round_n * 2 / sizeof(QKV_DT),
+                                    nowMRound);
                             }
                             SET_FLAG(MTE2, MTE1, l1_pingpong_flag + 4);
                             WAIT_FLAG(MTE2, MTE1, l1_pingpong_flag + 4);
@@ -521,18 +574,13 @@ public:
                                 }
                                 WAIT_FLAG(M, MTE1, l0_pingpong_flag + 2);
                                 for (uint32_t l0b_load_idx = 0; l0b_load_idx < 128 / BLOCK_SIZE; ++l0b_load_idx) {
-                                    l1_to_l0_b<ArchType::ASCEND_V220, QKV_DT, true, DataFormat::VECTOR, DataFormat::VECTOR>(
-                                        l0b_buf_tensor[l0_offset + l0b_load_idx * qk_round_k * BLOCK_SIZE],
-                                        l1v_buf_addr_tensor[kv_pingpong_offset + l0b_load_idx * CUBE_MATRIX_SIZE +
-                                                            l1_k_split_idx * n_slice * BLOCK_SIZE +
-                                                            l0_k_split_idx * 128 * BLOCK_SIZE],
-                                        0,
-                                        qk_round_k / BLOCK_SIZE, // repeat
-                                        0,
-                                        sv_round_n / BLOCK_SIZE, // srcStride
-                                        0,
-                                        0 // dstStride
-                                    );
+                                    l1_to_l0b_vector_raw<QKV_DT, true>(
+                                        (__cb__ QKV_DT *)l0b_buf_tensor[l0_offset + l0b_load_idx * qk_round_k * BLOCK_SIZE].GetPhyAddr(),
+                                        (__cbuf__ QKV_DT *)l1v_buf_addr_tensor[kv_pingpong_offset + l0b_load_idx * CUBE_MATRIX_SIZE +
+                                                                               l1_k_split_idx * n_slice * BLOCK_SIZE +
+                                                                               l0_k_split_idx * 128 * BLOCK_SIZE].GetPhyAddr(),
+                                        qk_round_k / BLOCK_SIZE,
+                                        sv_round_n / BLOCK_SIZE);
                                 }
                                 if (l0_last_split && l1_last_split && m_last_split){
                                     SET_FLAG(MTE1, MTE2, kv_pingpong_flag * 2);
@@ -540,10 +588,10 @@ public:
                                 }
                                 SET_FLAG(MTE1, M, l0_pingpong_flag + 6);
                                 WAIT_FLAG(MTE1, M, l0_pingpong_flag + 6);
-                                mmad<ArchType::ASCEND_V220, QKV_DT, QKV_DT, float, false>(
-                                    l0c_buf_tensor[l0c_offset],
-                                    l0a_buf_tensor[l0_offset],
-                                    l0b_buf_tensor[l0_offset],
+                                mmad_raw<ArchType::ASCEND_V220, QKV_DT, QKV_DT, float, false>(
+                                    (__cc__ float *)l0c_buf_tensor[l0c_offset].GetPhyAddr(),
+                                    (__ca__ QKV_DT *)l0a_buf_tensor[l0_offset].GetPhyAddr(),
+                                    (__cb__ QKV_DT *)l0b_buf_tensor[l0_offset].GetPhyAddr(),
                                     nowM, // m
                                     qk_round_k,  // n
                                     reduce_d, // k
@@ -557,14 +605,15 @@ public:
                         SET_FLAG(M, FIX, l0c_pingpong_flag);
                         WAIT_FLAG(M, FIX, l0c_pingpong_flag);
                         // // copy O to gm
-                        l0c_to_gm<ArchType::ASCEND_V220, DataFormat::ND, float, float>(
-                            o_tmp_gm_tensor[(uint64_t)block_idx * TMP_SIZE + (n_idx - launch_delay - n_start) % vect_mod * TMP_SIZE / vect_mod + gm_split_idx * split_m * qk_round_k],
-                            l0c_buf_tensor[l0c_offset],
-                            nowM,        // MSize
-                            qk_round_k,     // NSize
-                            nowMRound,  // srcStride
-                            qk_round_k     // dstStride_dst_D
-                        );
+                        l0c_to_gm_nd_raw<float, float>(
+                            (__gm__ float *)(o_tmp_gm + ((uint64_t)block_idx * TMP_SIZE +
+                                                         (n_idx - launch_delay - n_start) % vect_mod * TMP_SIZE / vect_mod +
+                                                         gm_split_idx * split_m * qk_round_k) * sizeof(float)),
+                            (__cc__ float *)l0c_buf_tensor[l0c_offset].GetPhyAddr(),
+                            nowM,
+                            qk_round_k,
+                            nowMRound,
+                            qk_round_k);
                         SET_FLAG(FIX, M, l0c_pingpong_flag);
                     }
                     FftsCrossCoreSync<PIPE_FIX, 2>(UPDATE_READY);
