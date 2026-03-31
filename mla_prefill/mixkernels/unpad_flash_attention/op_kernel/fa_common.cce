@@ -12,7 +12,6 @@
 #include "kernels/utils/kernel/common.h"
 #include "kernels/utils/kernel/common_func.h"
 #include "kernels/utils/kernel/simd.h"
-#include "kernels/utils/kernel/iterator.h"
 #include "kernels/utils/kernel/utils.h"
 #include "kernel_operator.h"
 
@@ -53,6 +52,30 @@ enum class MaskType {
     MASK_TYPE_MASK_FREE = 11,
     MASK_TYPE_MASK_SWA = 12
 };
+
+template <typename T>
+__aicore__ __attribute__((always_inline)) inline void ub_to_ub_raw(
+    const AscendC::LocalTensor<T> &dst, const AscendC::LocalTensor<T> &src, uint32_t len_burst)
+{
+    copy_ubuf_to_ubuf(
+        (__ubuf__ T *)dst.GetPhyAddr(), (__ubuf__ T *)src.GetPhyAddr(), 0, 1, len_burst, 0, 0);
+}
+
+template <typename T>
+__aicore__ __attribute__((always_inline)) inline void gm_to_ub_raw(
+    const AscendC::LocalTensor<T> &dst, __gm__ T *src, uint32_t n_burst, uint32_t len_burst)
+{
+    copy_gm_to_ubuf(
+        (__ubuf__ T *)dst.GetPhyAddr(), src, 0, n_burst, len_burst, 0, 0);
+}
+
+template <typename T>
+__aicore__ __attribute__((always_inline)) inline void ub_to_gm_raw(
+    __gm__ T *dst, const AscendC::LocalTensor<T> &src, uint32_t n_burst, uint32_t len_burst)
+{
+    copy_ubuf_to_gm(
+        dst, (__ubuf__ T *)src.GetPhyAddr(), 0, n_burst, len_burst, 0, 0);
+}
 
 __aicore__ __attribute__((always_inline)) inline void SetVecMask(int32_t len)
 {
@@ -160,8 +183,8 @@ struct OnlineSoftmaxStage1 {
         const AscendC::LocalTensor<EXP_DTYPE> &global_rowsum_ub,
         const AscendC::LocalTensor<P_DTYPE> &p_ub,
         const AscendC::LocalTensor<EXP_DTYPE> &tmp_ub,
-        const AscendC::GlobalTensor<S_DTYPE> &s_gm,
-        const AscendC::GlobalTensor<P_DTYPE> &p_gm,
+        __gm__ S_DTYPE *s_gm,
+        __gm__ P_DTYPE *p_gm,
         bool first_n_iter, S_DTYPE tor,
         uint32_t m, uint32_t n_real, uint32_t n_stride, uint32_t pingpong_flag);
 };
@@ -825,15 +848,7 @@ struct OnlineSoftmaxStage1Step1 {
 
     if (first_n_iter) {
         // *** hm = lm
-        ub_to_ub<ArchType::ASCEND_V220, float>(
-            hat_rowmax_ub,
-            local_rowmax_ub,
-            0,                          // sid
-            1,                          // nBurst
-            round_m / FLOAT_BLOCK_SIZE, // lenBurst
-            0,                          // srcGap
-            0                           // dstGap
-        );
+        ub_to_ub_raw<float>(hat_rowmax_ub, local_rowmax_ub, round_m / FLOAT_BLOCK_SIZE);
         PIPE_BARRIER(V);
     } else {
         SetVecMask(m);
@@ -879,15 +894,7 @@ struct OnlineSoftmaxStage1Step1 {
     SetVectorMask<int8_t>((uint64_t)-1, (uint64_t)-1);
     PIPE_BARRIER(V);
     // *** gm = hm
-    ub_to_ub<ArchType::ASCEND_V220, float>(
-        global_rowmax_ub,
-        hat_rowmax_ub,
-        0,                          // sid
-        1,                          // nBurst
-        round_m / FLOAT_BLOCK_SIZE, // lenBurst
-        0,                          // srcGap
-        0                           // dstGap
-    );
+    ub_to_ub_raw<float>(global_rowmax_ub, hat_rowmax_ub, round_m / FLOAT_BLOCK_SIZE);
     PIPE_BARRIER(V);
     // *** hm_block = expand_to_block(hm), 存放于 tv
     brcb_v<ArchType::ASCEND_V220, uint32_t>(
@@ -1098,15 +1105,7 @@ struct OnlineSoftmaxStage1Step1<MaskType::MASK_TYPE_CAUSAL_MASK>{
 
     if (first_n_iter) {
         // *** hm = lm
-        ub_to_ub<ArchType::ASCEND_V220, float>(
-            hat_rowmax_ub,
-            local_rowmax_ub,
-            0,                          // sid
-            1,                          // nBurst
-            round_m / FLOAT_BLOCK_SIZE, // lenBurst
-            0,                          // srcGap
-            0                           // dstGap
-        );
+        ub_to_ub_raw<float>(hat_rowmax_ub, local_rowmax_ub, round_m / FLOAT_BLOCK_SIZE);
         PIPE_BARRIER(V);
     } else {
         SetVecMask(m);
@@ -1152,15 +1151,7 @@ struct OnlineSoftmaxStage1Step1<MaskType::MASK_TYPE_CAUSAL_MASK>{
     SetVectorMask<int8_t>((uint64_t)-1, (uint64_t)-1);
     PIPE_BARRIER(V);
     // *** gm = hm
-    ub_to_ub<ArchType::ASCEND_V220, float>(
-        global_rowmax_ub,
-        hat_rowmax_ub,
-        0,                          // sid
-        1,                          // nBurst
-        round_m / FLOAT_BLOCK_SIZE, // lenBurst
-        0,                          // srcGap
-        0                           // dstGap
-    );
+    ub_to_ub_raw<float>(global_rowmax_ub, hat_rowmax_ub, round_m / FLOAT_BLOCK_SIZE);
     PIPE_BARRIER(V);
     // *** hm_block = expand_to_block(hm), 存放于 tv
     brcb_v<ArchType::ASCEND_V220, uint32_t>(
@@ -1252,15 +1243,7 @@ __aicore__ __attribute__((always_inline)) inline void OnlineSoftmaxStage1Step2(
     uint32_t round_m = (m + FLOAT_BLOCK_SIZE - 1) / FLOAT_BLOCK_SIZE * FLOAT_BLOCK_SIZE;
     if (first_n_iter) {
         // *** gl = ll
-        ub_to_ub<ArchType::ASCEND_V220, float>(
-            global_rowsum_ub,
-            local_rowsum_ub,
-            0,                              // sid
-            1,                              // nBurst
-            round_m / FLOAT_BLOCK_SIZE, // lenBurst
-            0,                              // srcGap
-            0                               // dstGap
-        );
+        ub_to_ub_raw<float>(global_rowsum_ub, local_rowsum_ub, round_m / FLOAT_BLOCK_SIZE);
         PIPE_BARRIER(V);
     } else {
         SetVecMask(m);
@@ -1312,23 +1295,15 @@ struct OnlineSoftmaxStage1<float, float, P_DTYPE, MASK_DTYPE, MaskType::MASK_TYP
         const AscendC::LocalTensor<float> &global_rowsum_ub,
         const AscendC::LocalTensor<P_DTYPE> &p_ub,
         const AscendC::LocalTensor<float> &tmp_ub,
-        const AscendC::GlobalTensor<float> &s_gm,
-        const AscendC::GlobalTensor<P_DTYPE> &p_gm,
+        __gm__ float *s_gm,
+        __gm__ P_DTYPE *p_gm,
         bool first_n_iter, float tor,
         uint32_t m, uint32_t n_real, uint32_t n_stride, uint32_t pingpong_flag)
     {
         uint32_t round_m = (m + FLOAT_BLOCK_SIZE - 1) / FLOAT_BLOCK_SIZE * FLOAT_BLOCK_SIZE;
         WAIT_FLAG(MTE3, MTE2, pingpong_flag);
         // input QK
-        gm_to_ub<ArchType::ASCEND_V220, float>(
-            s_ub,
-            s_gm,
-            0,                            // sid
-            m,                            // nBurst
-            n_stride / FLOAT_BLOCK_SIZE,  // lenBurst
-            0,                            // srcGap
-            0                             // dstGap
-        );
+        gm_to_ub_raw<float>(s_ub, s_gm, m, n_stride / FLOAT_BLOCK_SIZE);
         SET_FLAG(MTE2, V, pingpong_flag);
         WAIT_FLAG(MTE2, V, pingpong_flag);
 
@@ -1356,15 +1331,7 @@ struct OnlineSoftmaxStage1<float, float, P_DTYPE, MASK_DTYPE, MaskType::MASK_TYP
         );
         SET_FLAG(V, MTE3, pingpong_flag);
         WAIT_FLAG(V, MTE3, pingpong_flag);
-        ub_to_gm<ArchType::ASCEND_V220, P_DTYPE>(
-            p_gm,
-            p_ub,
-            0,                                    // sid
-            m,                              // nBurst
-            n_stride * 2 / BlockSize<int8_t>(), // lenBurst
-            0,                                    // srcGap
-            0                                     // dstGap
-        );
+        ub_to_gm_raw<P_DTYPE>(p_gm, p_ub, m, n_stride * 2 / BlockSize<int8_t>());
         SET_FLAG(MTE3, MTE2, pingpong_flag);
 
         OnlineSoftmaxStage1Step2(
@@ -1391,8 +1358,8 @@ struct OnlineSoftmaxStage1<float, float, P_DTYPE, MASK_DTYPE, MaskType::MASK_TYP
         const AscendC::LocalTensor<float> &global_rowsum_ub,
         const AscendC::LocalTensor<P_DTYPE> &p_ub,
         const AscendC::LocalTensor<float> &tmp_ub,
-        const AscendC::GlobalTensor<float> &s_gm,
-        const AscendC::GlobalTensor<P_DTYPE> &p_gm,
+        __gm__ float *s_gm,
+        __gm__ P_DTYPE *p_gm,
         bool first_n_iter, float tor, float mask_coff,
         uint32_t m, uint32_t n_real, uint32_t n_stride, uint32_t pp_n_scalar,
         bool last_n_loop, uint32_t slice_row_offset, uint32_t sub_m1, uint32_t pingpong_flag)
@@ -1400,15 +1367,7 @@ struct OnlineSoftmaxStage1<float, float, P_DTYPE, MASK_DTYPE, MaskType::MASK_TYP
         uint32_t round_m = (m + FLOAT_BLOCK_SIZE - 1) / FLOAT_BLOCK_SIZE * FLOAT_BLOCK_SIZE;
         WAIT_FLAG(MTE3, MTE2, pingpong_flag);
         // input QK
-        gm_to_ub<ArchType::ASCEND_V220, float>(
-            s_ub,
-            s_gm,
-            0,                            // sid
-            m,                            // nBurst
-            n_stride / FLOAT_BLOCK_SIZE,  // lenBurst
-            0,                            // srcGap
-            0                             // dstGap
-        );
+        gm_to_ub_raw<float>(s_ub, s_gm, m, n_stride / FLOAT_BLOCK_SIZE);
         SET_FLAG(MTE2, V, pingpong_flag);
         WAIT_FLAG(MTE2, V, pingpong_flag);
         
@@ -1438,15 +1397,7 @@ struct OnlineSoftmaxStage1<float, float, P_DTYPE, MASK_DTYPE, MaskType::MASK_TYP
         );
         SET_FLAG(V, MTE3, pingpong_flag);
         WAIT_FLAG(V, MTE3, pingpong_flag);
-        ub_to_gm<ArchType::ASCEND_V220, P_DTYPE>(
-            p_gm,
-            p_ub,
-            0,                                    // sid
-            m,                              // nBurst
-            n_stride * 2 / BlockSize<int8_t>(), // lenBurst
-            0,                                    // srcGap
-            0                                     // dstGap
-        );
+        ub_to_gm_raw<P_DTYPE>(p_gm, p_ub, m, n_stride * 2 / BlockSize<int8_t>());
         SET_FLAG(MTE3, MTE2, pingpong_flag);
 
         OnlineSoftmaxStage1Step2(
