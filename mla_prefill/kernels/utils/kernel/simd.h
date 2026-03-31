@@ -17,23 +17,23 @@ constexpr uint32_t DUP_REPEAT_SIZE = 256;
 // vcgadd
 /////////////////////////////////////////////////////
 template <ArchType ArchTag, typename DType>
-__aicore__ inline void cgadd_v(AscendC::LocalTensor<DType> dst,
-                               AscendC::LocalTensor<DType> src,
+__aicore__ inline void cgadd_v(__ubuf__ AscendC::PrimT<DType>* dst,
+                               __ubuf__ AscendC::PrimT<DType>* src,
                                const int32_t repeat,
                                const int32_t dstRepStride,
                                const int32_t srcBlkStride,
                                const int32_t srcRepStride)
 {
-    AscendC::BlockReduceSum<DType, false>(dst, src, repeat, 0, dstRepStride, srcBlkStride, srcRepStride);
+    vcgadd(dst, src, repeat, dstRepStride, srcBlkStride, srcRepStride);
 }
 
 /////////////////////////////////////////////////////
 // vadd
 /////////////////////////////////////////////////////
 template <ArchType ArchTag, typename DType>
-__aicore__ inline void add_v(AscendC::LocalTensor<DType> dst,
-                             AscendC::LocalTensor<DType> src0,
-                             AscendC::LocalTensor<DType> src1,
+__aicore__ inline void add_v(__ubuf__ AscendC::PrimT<DType>* dst,
+                             __ubuf__ AscendC::PrimT<DType>* src0,
+                             __ubuf__ AscendC::PrimT<DType>* src1,
                              uint8_t repeat,
                              uint8_t dstBlockStride,
                              uint8_t src0BlockStride,
@@ -42,22 +42,16 @@ __aicore__ inline void add_v(AscendC::LocalTensor<DType> dst,
                              uint8_t src0RepeatStride,
                              uint8_t src1RepeatStride)
 {
-    AscendC::Add<DType, false>(
-        dst,
-        src0,
-        src1,
-        (uint64_t)0,
-        repeat,
-        AscendC::BinaryRepeatParams(
-            dstBlockStride, src0BlockStride, src1BlockStride, dstRepeatStride, src0RepeatStride, src1RepeatStride));
+    vadd(dst, src0, src1, repeat, dstBlockStride, src0BlockStride, src1BlockStride, dstRepeatStride,
+         src0RepeatStride, src1RepeatStride);
 }
 
 /////////////////////////////////////////////////////
 // vadds
 /////////////////////////////////////////////////////
 template <ArchType ArchTag, typename DType>
-__aicore__ inline void adds_v(AscendC::LocalTensor<DType> dst,
-                              AscendC::LocalTensor<DType> src,
+__aicore__ inline void adds_v(__ubuf__ AscendC::PrimT<DType>* dst,
+                              __ubuf__ AscendC::PrimT<DType>* src,
                               DType scalarValue,
                               uint8_t repeat,
                               uint8_t dstBlockStride,
@@ -65,58 +59,61 @@ __aicore__ inline void adds_v(AscendC::LocalTensor<DType> dst,
                               uint8_t dstRepeatStride,
                               uint8_t srcRepeatStride)
 {
-    AscendC::Adds<DType, false>(
-        dst,
-        src,
-        scalarValue,
-        (uint64_t)0,
-        repeat,
-        AscendC::UnaryRepeatParams(dstBlockStride, srcBlockStride, dstRepeatStride, srcRepeatStride));
+    vadds(dst, src, scalarValue, repeat, static_cast<uint16_t>(dstBlockStride),
+          static_cast<uint16_t>(srcBlockStride), dstRepeatStride, srcRepeatStride);
 }
 
 /////////////////////////////////////////////////////
 // vcadd
 /////////////////////////////////////////////////////
 template <ArchType ArchTag, typename DType>
-__aicore__ inline void cadd_v(AscendC::LocalTensor<DType> dst,
-                              AscendC::LocalTensor<DType> src,
+__aicore__ inline void cadd_v(__ubuf__ AscendC::PrimT<DType>* dst,
+                              __ubuf__ AscendC::PrimT<DType>* src,
                               uint8_t repeat,
                               uint16_t dstRepeatStride,
                               uint16_t srcBlockStride,
                               uint16_t srcRepeatStride)
 {
-    AscendC::RepeatReduceSum<DType, false>(dst, src, repeat, 0, 0, srcBlockStride, dstRepeatStride, srcRepeatStride);
+    vcadd(dst, src, repeat, dstRepeatStride, srcBlockStride, srcRepeatStride, 0);
 }
 /////////////////////////////////////////////////////
 // vbrcb
 /////////////////////////////////////////////////////
 template <ArchType ArchTag, typename DType>
-__aicore__ inline void brcb_v(AscendC::LocalTensor<DType> dst,
-                              AscendC::LocalTensor<DType> src,
+__aicore__ inline void brcb_v(__ubuf__ AscendC::PrimT<DType>* dst,
+                              __ubuf__ AscendC::PrimT<DType>* src,
                               uint16_t dstBlockStride,
                               uint16_t dstRepeatStride,
                               uint8_t repeat)
 {
-    AscendC::Brcb(dst, src, repeat, AscendC::BrcbRepeatParams(dstBlockStride, dstRepeatStride));
+    if constexpr (sizeof(DType) == 2) {
+        vbrcb((__ubuf__ uint16_t*)dst, (__ubuf__ uint16_t*)src, dstBlockStride, dstRepeatStride, repeat);
+    } else {
+        vbrcb((__ubuf__ uint32_t*)dst, (__ubuf__ uint32_t*)src, dstBlockStride, dstRepeatStride, repeat);
+    }
 }
 
 /////////////////////////////////////////////////////
 // vcmax
 /////////////////////////////////////////////////////
 template <ArchType ArchTag, typename DType, AscendC::ReduceOrder OrderType>
-__aicore__ inline void cmax_v(AscendC::LocalTensor<DType> dst,
-                              AscendC::LocalTensor<DType> src,
+__aicore__ inline void cmax_v(__ubuf__ AscendC::PrimT<DType>* dst,
+                              __ubuf__ AscendC::PrimT<DType>* src,
                               uint8_t repeat,
                               uint16_t dstRepeatStride,
                               uint16_t srcBlockStride,
                               uint16_t srcRepeatStride)
 {
 #if defined(__DAV_C220_VEC__)
-    AscendC::WholeReduceMax<DType, false>(
-        dst, src, (int32_t)0, repeat, dstRepeatStride, srcBlockStride, srcRepeatStride, OrderType);
+    vcmax(dst,
+          src,
+          repeat,
+          dstRepeatStride,
+          srcBlockStride,
+          srcRepeatStride,
+          static_cast<Order_t>(OrderType));
 #else
-    AscendC::WholeReduceMax<DType, false>(
-        dst, src, (int32_t)0, repeat, dstRepeatStride, srcBlockStride, srcRepeatStride);
+    vcmax(dst, src, repeat, dstRepeatStride, srcBlockStride, srcRepeatStride);
 #endif
 }
 
@@ -124,8 +121,8 @@ __aicore__ inline void cmax_v(AscendC::LocalTensor<DType> dst,
 // vconv
 /////////////////////////////////////////////////////
 template <ArchType ArchTag, typename DTypeIn, typename DTypeOut>
-__aicore__ inline void conv_v(AscendC::LocalTensor<DTypeOut> dst,
-                              AscendC::LocalTensor<DTypeIn> src,
+__aicore__ inline void conv_v(__ubuf__ AscendC::PrimT<DTypeOut>* dst,
+                              __ubuf__ AscendC::PrimT<DTypeIn>* src,
                               uint8_t repeat,
                               uint16_t dstBlockStride,
                               uint16_t srcBlockStride,
@@ -133,21 +130,39 @@ __aicore__ inline void conv_v(AscendC::LocalTensor<DTypeOut> dst,
                               uint16_t srcRepeatStride)
 {
     if constexpr (std::is_same<DTypeIn, float>::value && std::is_same<DTypeOut, __bf16>::value) {
-        AscendC::Cast<DTypeOut, DTypeIn, false>(
-            dst,
-            src,
-            AscendC::RoundMode::CAST_RINT,
-            (uint64_t)0,
-            repeat,
-            AscendC::UnaryRepeatParams(dstBlockStride, srcBlockStride, dstRepeatStride, srcRepeatStride));
+        vconv_f322bf16r((__ubuf__ __bf16*)dst,
+                        (__ubuf__ float*)src,
+                        repeat,
+                        dstBlockStride,
+                        srcBlockStride,
+                        dstRepeatStride,
+                        srcRepeatStride);
+    } else if constexpr (std::is_same<DTypeIn, float>::value && std::is_same<DTypeOut, half>::value) {
+        vconv_f322f16((__ubuf__ half*)dst,
+                      (__ubuf__ float*)src,
+                      repeat,
+                      dstBlockStride,
+                      srcBlockStride,
+                      dstRepeatStride,
+                      srcRepeatStride);
+    } else if constexpr (std::is_same<DTypeIn, half>::value && std::is_same<DTypeOut, float>::value) {
+        vconv_f162f32((__ubuf__ float*)dst,
+                      (__ubuf__ half*)src,
+                      repeat,
+                      dstBlockStride,
+                      srcBlockStride,
+                      dstRepeatStride,
+                      srcRepeatStride);
+    } else if constexpr (std::is_same<DTypeIn, __bf16>::value && std::is_same<DTypeOut, float>::value) {
+        vconv_bf162f32((__ubuf__ float*)dst,
+                       (__ubuf__ __bf16*)src,
+                       repeat,
+                       dstBlockStride,
+                       srcBlockStride,
+                       dstRepeatStride,
+                       srcRepeatStride);
     } else {
-        AscendC::Cast<DTypeOut, DTypeIn, false>(
-            dst,
-            src,
-            AscendC::RoundMode::CAST_NONE,
-            (uint64_t)0,
-            repeat,
-            AscendC::UnaryRepeatParams(dstBlockStride, srcBlockStride, dstRepeatStride, srcRepeatStride));
+        static_assert(!std::is_same<DTypeIn, DTypeIn>::value, "Unsupported conv_v dtype combination.");
     }
 }
 
@@ -155,30 +170,42 @@ __aicore__ inline void conv_v(AscendC::LocalTensor<DTypeOut> dst,
 // vconv_f322bf16r
 /////////////////////////////////////////////////////
 template <ArchType ArchTag, typename DTypeIn, typename DTypeOut>
-__aicore__ inline void convr_v(AscendC::LocalTensor<DTypeOut> dst,
-                               AscendC::LocalTensor<DTypeIn> src,
+__aicore__ inline void convr_v(__ubuf__ AscendC::PrimT<DTypeOut>* dst,
+                               __ubuf__ AscendC::PrimT<DTypeIn>* src,
                                uint8_t repeat,
                                uint16_t dstBlockStride,
                                uint16_t srcBlockStride,
                                uint16_t dstRepeatStride,
                                uint16_t srcRepeatStride)
 {
-    AscendC::Cast<DTypeOut, DTypeIn, false>(
-        dst,
-        src,
-        AscendC::RoundMode::CAST_RINT,
-        (uint64_t)0,
-        repeat,
-        AscendC::UnaryRepeatParams(dstBlockStride, srcBlockStride, dstRepeatStride, srcRepeatStride));
+    if constexpr (std::is_same<DTypeIn, float>::value && std::is_same<DTypeOut, __bf16>::value) {
+        vconv_f322bf16r((__ubuf__ __bf16*)dst,
+                        (__ubuf__ float*)src,
+                        repeat,
+                        dstBlockStride,
+                        srcBlockStride,
+                        dstRepeatStride,
+                        srcRepeatStride);
+    } else if constexpr (std::is_same<DTypeIn, float>::value && std::is_same<DTypeOut, half>::value) {
+        vconv_f322f16r((__ubuf__ half*)dst,
+                       (__ubuf__ float*)src,
+                       repeat,
+                       dstBlockStride,
+                       srcBlockStride,
+                       dstRepeatStride,
+                       srcRepeatStride);
+    } else {
+        static_assert(!std::is_same<DTypeIn, DTypeIn>::value, "Unsupported convr_v dtype combination.");
+    }
 }
 
 /////////////////////////////////////////////////////
 // vdiv
 /////////////////////////////////////////////////////
 template <ArchType ArchTag, typename DType>
-__aicore__ inline void div_v(AscendC::LocalTensor<DType> dst,
-                             AscendC::LocalTensor<DType> src0,
-                             AscendC::LocalTensor<DType> src1,
+__aicore__ inline void div_v(__ubuf__ AscendC::PrimT<DType>* dst,
+                             __ubuf__ AscendC::PrimT<DType>* src0,
+                             __ubuf__ AscendC::PrimT<DType>* src1,
                              uint8_t repeat,
                              uint8_t dstBlockStride,
                              uint8_t src0BlockStride,
@@ -187,43 +214,32 @@ __aicore__ inline void div_v(AscendC::LocalTensor<DType> dst,
                              uint8_t src0RepeatStride,
                              uint8_t src1RepeatStride)
 {
-    AscendC::Div<DType, false>(
-        dst,
-        src0,
-        src1,
-        (uint64_t)0,
-        repeat,
-        AscendC::BinaryRepeatParams(
-            dstBlockStride, src0BlockStride, src1BlockStride, dstRepeatStride, src0RepeatStride, src1RepeatStride));
+    vdiv(dst, src0, src1, repeat, dstBlockStride, src0BlockStride, src1BlockStride, dstRepeatStride,
+         src0RepeatStride, src1RepeatStride);
 }
 
 /////////////////////////////////////////////////////
 // vexp
 /////////////////////////////////////////////////////
 template <ArchType ArchTag, typename DType>
-__aicore__ inline void exp_v(AscendC::LocalTensor<DType> dst,
-                             AscendC::LocalTensor<DType> src,
+__aicore__ inline void exp_v(__ubuf__ AscendC::PrimT<DType>* dst,
+                             __ubuf__ AscendC::PrimT<DType>* src,
                              uint8_t repeat,
                              uint16_t dstBlockStride,
                              uint16_t srcBlockStride,
                              uint16_t dstRepeatStride,
                              uint16_t srcRepeatStride)
 {
-    AscendC::Exp<DType, false>(
-        dst,
-        src,
-        (uint64_t)0,
-        repeat,
-        AscendC::UnaryRepeatParams(dstBlockStride, srcBlockStride, dstRepeatStride, srcRepeatStride));
+    vexp(dst, src, repeat, dstBlockStride, srcBlockStride, dstRepeatStride, srcRepeatStride);
 }
 
 /////////////////////////////////////////////////////
 // vmax
 /////////////////////////////////////////////////////
 template <ArchType ArchTag, typename DType>
-__aicore__ inline void max_v(AscendC::LocalTensor<DType> dst,
-                             AscendC::LocalTensor<DType> src0,
-                             AscendC::LocalTensor<DType> src1,
+__aicore__ inline void max_v(__ubuf__ AscendC::PrimT<DType>* dst,
+                             __ubuf__ AscendC::PrimT<DType>* src0,
+                             __ubuf__ AscendC::PrimT<DType>* src1,
                              uint8_t repeat,
                              uint8_t dstBlockStride,
                              uint8_t src0BlockStride,
@@ -232,23 +248,17 @@ __aicore__ inline void max_v(AscendC::LocalTensor<DType> dst,
                              uint8_t src0RepeatStride,
                              uint8_t src1RepeatStride)
 {
-    AscendC::Max<DType, false>(
-        dst,
-        src0,
-        src1,
-        (uint64_t)0,
-        repeat,
-        AscendC::BinaryRepeatParams(
-            dstBlockStride, src0BlockStride, src1BlockStride, dstRepeatStride, src0RepeatStride, src1RepeatStride));
+    vmax(dst, src0, src1, repeat, dstBlockStride, src0BlockStride, src1BlockStride, dstRepeatStride,
+         src0RepeatStride, src1RepeatStride);
 }
 
 /////////////////////////////////////////////////////
 // vmul
 /////////////////////////////////////////////////////
 template <ArchType ArchTag, typename DType>
-__aicore__ inline void mul_v(AscendC::LocalTensor<DType> dst,
-                             AscendC::LocalTensor<DType> src0,
-                             AscendC::LocalTensor<DType> src1,
+__aicore__ inline void mul_v(__ubuf__ AscendC::PrimT<DType>* dst,
+                             __ubuf__ AscendC::PrimT<DType>* src0,
+                             __ubuf__ AscendC::PrimT<DType>* src1,
                              uint8_t repeat,
                              uint8_t dstBlockStride,
                              uint8_t src0BlockStride,
@@ -257,22 +267,16 @@ __aicore__ inline void mul_v(AscendC::LocalTensor<DType> dst,
                              uint8_t src0RepeatStride,
                              uint8_t src1RepeatStride)
 {
-    AscendC::Mul<DType, false>(
-        dst,
-        src0,
-        src1,
-        (uint64_t)0,
-        repeat,
-        AscendC::BinaryRepeatParams(
-            dstBlockStride, src0BlockStride, src1BlockStride, dstRepeatStride, src0RepeatStride, src1RepeatStride));
+    vmul(dst, src0, src1, repeat, dstBlockStride, src0BlockStride, src1BlockStride, dstRepeatStride,
+         src0RepeatStride, src1RepeatStride);
 }
 
 /////////////////////////////////////////////////////
 // vmuls
 /////////////////////////////////////////////////////
 template <ArchType ArchTag, typename DType>
-__aicore__ inline void muls_v(AscendC::LocalTensor<DType> dst,
-                              AscendC::LocalTensor<DType> src0,
+__aicore__ inline void muls_v(__ubuf__ AscendC::PrimT<DType>* dst,
+                              __ubuf__ AscendC::PrimT<DType>* src0,
                               DType src1,
                               uint8_t repeat,
                               uint16_t dstBlockStride,
@@ -280,22 +284,16 @@ __aicore__ inline void muls_v(AscendC::LocalTensor<DType> dst,
                               uint16_t dstRepeatStride,
                               uint16_t srcRepeatStride)
 {
-    AscendC::Muls<DType, false>(
-        dst,
-        src0,
-        src1,
-        (uint64_t)0,
-        repeat,
-        AscendC::UnaryRepeatParams(dstBlockStride, srcBlockStride, dstRepeatStride, srcRepeatStride));
+    vmuls(dst, src0, src1, repeat, dstBlockStride, srcBlockStride, dstRepeatStride, srcRepeatStride);
 }
 
 /////////////////////////////////////////////////////
 // vsub
 /////////////////////////////////////////////////////
 template <ArchType ArchTag, typename DType>
-__aicore__ inline void sub_v(AscendC::LocalTensor<DType> dst,
-                             AscendC::LocalTensor<DType> src0,
-                             AscendC::LocalTensor<DType> src1,
+__aicore__ inline void sub_v(__ubuf__ AscendC::PrimT<DType>* dst,
+                             __ubuf__ AscendC::PrimT<DType>* src0,
+                             __ubuf__ AscendC::PrimT<DType>* src1,
                              uint8_t repeat,
                              uint8_t dstBlockStride,
                              uint8_t src0BlockStride,
@@ -304,22 +302,16 @@ __aicore__ inline void sub_v(AscendC::LocalTensor<DType> dst,
                              uint8_t src0RepeatStride,
                              uint8_t src1RepeatStride)
 {
-    AscendC::Sub<DType, false>(
-        dst,
-        src0,
-        src1,
-        (uint64_t)0,
-        repeat,
-        AscendC::BinaryRepeatParams(
-            dstBlockStride, src0BlockStride, src1BlockStride, dstRepeatStride, src0RepeatStride, src1RepeatStride));
+    vsub(dst, src0, src1, repeat, dstBlockStride, src0BlockStride, src1BlockStride, dstRepeatStride,
+         src0RepeatStride, src1RepeatStride);
 }
 
 /////////////////////////////////////////////////////
 // vmaxs
 /////////////////////////////////////////////////////
 template <ArchType ArchTag, typename DType>
-__aicore__ inline void maxs_v(AscendC::LocalTensor<DType> dst,
-                              AscendC::LocalTensor<DType> src0,
+__aicore__ inline void maxs_v(__ubuf__ AscendC::PrimT<DType>* dst,
+                              __ubuf__ AscendC::PrimT<DType>* src0,
                               DType src1,
                               uint8_t repeat,
                               uint16_t dstBlockStride,
@@ -327,21 +319,15 @@ __aicore__ inline void maxs_v(AscendC::LocalTensor<DType> dst,
                               uint16_t dstRepeatStride,
                               uint16_t srcRepeatStride)
 {
-    AscendC::Maxs<DType, false>(
-        dst,
-        src0,
-        src1,
-        (uint64_t)0,
-        repeat,
-        AscendC::UnaryRepeatParams(dstBlockStride, srcBlockStride, dstRepeatStride, srcRepeatStride));
+    vmaxs(dst, src0, src1, repeat, dstBlockStride, srcBlockStride, dstRepeatStride, srcRepeatStride);
 }
 
 /////////////////////////////////////////////////////
 // vmins
 /////////////////////////////////////////////////////
 template <ArchType ArchTag, typename DType>
-__aicore__ inline void mins_v(AscendC::LocalTensor<DType> dst,
-                              AscendC::LocalTensor<DType> src0,
+__aicore__ inline void mins_v(__ubuf__ AscendC::PrimT<DType>* dst,
+                              __ubuf__ AscendC::PrimT<DType>* src0,
                               DType src1,
                               uint8_t repeat,
                               uint16_t dstBlockStride,
@@ -349,83 +335,185 @@ __aicore__ inline void mins_v(AscendC::LocalTensor<DType> dst,
                               uint16_t dstRepeatStride,
                               uint16_t srcRepeatStride)
 {
-    AscendC::Mins<DType, false>(
-        dst,
-        src0,
-        src1,
-        (uint64_t)0,
-        repeat,
-        AscendC::UnaryRepeatParams(dstBlockStride, srcBlockStride, dstRepeatStride, srcRepeatStride));
+    vmins(dst, src0, src1, repeat, dstBlockStride, srcBlockStride, dstRepeatStride, srcRepeatStride);
 }
 
 /////////////////////////////////////////////////////
 // vsqrt
 /////////////////////////////////////////////////////
 template <ArchType ArchTag, typename DType>
-__aicore__ inline void sqrt_v(AscendC::LocalTensor<DType> dst,
-                              AscendC::LocalTensor<DType> src,
+__aicore__ inline void sqrt_v(__ubuf__ AscendC::PrimT<DType>* dst,
+                              __ubuf__ AscendC::PrimT<DType>* src,
                               uint8_t repeat,
                               uint16_t dstBlockStride,
                               uint16_t srcBlockStride,
                               uint16_t dstRepeatStride,
                               uint16_t srcRepeatStride)
 {
-    AscendC::Sqrt<DType, false>(
-        dst,
-        src,
-        (uint64_t)0,
-        repeat,
-        AscendC::UnaryRepeatParams(dstBlockStride, srcBlockStride, dstRepeatStride, srcRepeatStride));
+    vsqrt(dst, src, repeat, dstBlockStride, srcBlockStride, dstRepeatStride, srcRepeatStride);
 }
 
 /////////////////////////////////////////////////////
 // vln
 /////////////////////////////////////////////////////
 template <ArchType ArchTag, typename DType>
-__aicore__ inline void ln_v(AscendC::LocalTensor<DType> dst,
-                            AscendC::LocalTensor<DType> src,
+__aicore__ inline void ln_v(__ubuf__ AscendC::PrimT<DType>* dst,
+                            __ubuf__ AscendC::PrimT<DType>* src,
                             uint8_t repeat,
                             uint16_t dstBlockStride,
                             uint16_t srcBlockStride,
                             uint16_t dstRepeatStride,
                             uint16_t srcRepeatStride)
 {
-    AscendC::Ln<DType, false>(
-        dst,
-        src,
-        (uint64_t)0,
-        repeat,
-        AscendC::UnaryRepeatParams(dstBlockStride, srcBlockStride, dstRepeatStride, srcRepeatStride));
+    vln(dst, src, repeat, dstBlockStride, srcBlockStride, dstRepeatStride, srcRepeatStride);
 }
 
 /////////////////////////////////////////////////////
 // vtranspose
 /////////////////////////////////////////////////////
 template <ArchType ArchTag, typename DType>
-__aicore__ inline void tranpose_v(AscendC::LocalTensor<DType> dst, AscendC::LocalTensor<DType> src)
+__aicore__ inline void tranpose_v(__ubuf__ AscendC::PrimT<DType>* dst, __ubuf__ AscendC::PrimT<DType>* src)
 {
-    AscendC::Transpose(dst, src);
+    vtranspose(dst, src);
 }
 
 /////////////////////////////////////////////////////
 // vcgmax
 /////////////////////////////////////////////////////
 template <ArchType ArchTag, typename DType>
-__aicore__ inline void cgmax_v(AscendC::LocalTensor<DType> dst,
-                               AscendC::LocalTensor<DType> src,
+__aicore__ inline void cgmax_v(__ubuf__ AscendC::PrimT<DType>* dst,
+                               __ubuf__ AscendC::PrimT<DType>* src,
                                const int32_t repeat,
                                const int32_t dstRepStride,
                                const int32_t srcBlkStride,
                                const int32_t srcRepStride)
 {
-    AscendC::BlockReduceMax<DType, false>(dst, src, repeat, 0, dstRepStride, srcBlkStride, srcRepStride);
+    vcgmax(dst, src, repeat, dstRepStride, srcBlkStride, srcRepStride);
 }
 
 template <ArchType ArchTag, typename DType>
-__aicore__ inline void dup_v(AscendC::LocalTensor<DType> dst,
+__aicore__ inline void dup_v(__ubuf__ AscendC::PrimT<DType>* dst,
                              DType src1,
                              const int32_t repeat)
 {
-    AscendC::Duplicate(dst, src1, repeat * DUP_REPEAT_SIZE / sizeof(DType));
+    vector_dup(dst,
+               src1,
+               static_cast<uint8_t>(repeat * DUP_REPEAT_SIZE / sizeof(DType)),
+               static_cast<uint16_t>(1),
+               static_cast<uint16_t>(1),
+               static_cast<uint8_t>(1),
+               static_cast<uint8_t>(0));
+}
+
+template <typename DType, typename TLike>
+__aicore__ inline __ubuf__ AscendC::PrimT<DType>* ub_addr(const TLike& t)
+{
+    return (__ubuf__ AscendC::PrimT<DType>*)t.GetPhyAddr();
+}
+
+template <ArchType A, typename T, typename D, typename S>
+__aicore__ inline void cgadd_v(const D& dst, const S& src, int32_t r, int32_t ds, int32_t sbs, int32_t srs)
+{
+    cgadd_v<A, T>(ub_addr<T>(dst), ub_addr<T>(src), r, ds, sbs, srs);
+}
+template <ArchType A, typename T, typename D, typename S0, typename S1>
+__aicore__ inline void add_v(const D& dst, const S0& s0, const S1& s1, uint8_t r, uint8_t dbs, uint8_t s0bs, uint8_t s1bs, uint8_t drs, uint8_t s0rs, uint8_t s1rs)
+{
+    add_v<A, T>(ub_addr<T>(dst), ub_addr<T>(s0), ub_addr<T>(s1), r, dbs, s0bs, s1bs, drs, s0rs, s1rs);
+}
+template <ArchType A, typename T, typename D, typename S>
+__aicore__ inline void adds_v(const D& dst, const S& src, T sv, uint8_t r, uint8_t dbs, uint8_t sbs, uint8_t drs, uint8_t srs)
+{
+    adds_v<A, T>(ub_addr<T>(dst), ub_addr<T>(src), sv, r, dbs, sbs, drs, srs);
+}
+template <ArchType A, typename T, typename D, typename S>
+__aicore__ inline void cadd_v(const D& dst, const S& src, uint8_t r, uint16_t drs, uint16_t sbs, uint16_t srs)
+{
+    cadd_v<A, T>(ub_addr<T>(dst), ub_addr<T>(src), r, drs, sbs, srs);
+}
+template <ArchType A, typename T, typename D, typename S>
+__aicore__ inline void brcb_v(const D& dst, const S& src, uint16_t dbs, uint16_t drs, uint8_t r)
+{
+    brcb_v<A, T>(ub_addr<T>(dst), ub_addr<T>(src), dbs, drs, r);
+}
+template <ArchType A, typename T, AscendC::ReduceOrder O, typename D, typename S>
+__aicore__ inline void cmax_v(const D& dst, const S& src, uint8_t r, uint16_t drs, uint16_t sbs, uint16_t srs)
+{
+    cmax_v<A, T, O>(ub_addr<T>(dst), ub_addr<T>(src), r, drs, sbs, srs);
+}
+template <ArchType A, typename In, typename Out, typename D, typename S>
+__aicore__ inline void conv_v(const D& dst, const S& src, uint8_t r, uint16_t dbs, uint16_t sbs, uint16_t drs, uint16_t srs)
+{
+    conv_v<A, In, Out>(ub_addr<Out>(dst), ub_addr<In>(src), r, dbs, sbs, drs, srs);
+}
+template <ArchType A, typename In, typename Out, typename D, typename S>
+__aicore__ inline void convr_v(const D& dst, const S& src, uint8_t r, uint16_t dbs, uint16_t sbs, uint16_t drs, uint16_t srs)
+{
+    convr_v<A, In, Out>(ub_addr<Out>(dst), ub_addr<In>(src), r, dbs, sbs, drs, srs);
+}
+template <ArchType A, typename T, typename D, typename S0, typename S1>
+__aicore__ inline void div_v(const D& dst, const S0& s0, const S1& s1, uint8_t r, uint8_t dbs, uint8_t s0bs, uint8_t s1bs, uint8_t drs, uint8_t s0rs, uint8_t s1rs)
+{
+    div_v<A, T>(ub_addr<T>(dst), ub_addr<T>(s0), ub_addr<T>(s1), r, dbs, s0bs, s1bs, drs, s0rs, s1rs);
+}
+template <ArchType A, typename T, typename D, typename S>
+__aicore__ inline void exp_v(const D& dst, const S& src, uint8_t r, uint16_t dbs, uint16_t sbs, uint16_t drs, uint16_t srs)
+{
+    exp_v<A, T>(ub_addr<T>(dst), ub_addr<T>(src), r, dbs, sbs, drs, srs);
+}
+template <ArchType A, typename T, typename D, typename S0, typename S1>
+__aicore__ inline void max_v(const D& dst, const S0& s0, const S1& s1, uint8_t r, uint8_t dbs, uint8_t s0bs, uint8_t s1bs, uint8_t drs, uint8_t s0rs, uint8_t s1rs)
+{
+    max_v<A, T>(ub_addr<T>(dst), ub_addr<T>(s0), ub_addr<T>(s1), r, dbs, s0bs, s1bs, drs, s0rs, s1rs);
+}
+template <ArchType A, typename T, typename D, typename S0, typename S1>
+__aicore__ inline void mul_v(const D& dst, const S0& s0, const S1& s1, uint8_t r, uint8_t dbs, uint8_t s0bs, uint8_t s1bs, uint8_t drs, uint8_t s0rs, uint8_t s1rs)
+{
+    mul_v<A, T>(ub_addr<T>(dst), ub_addr<T>(s0), ub_addr<T>(s1), r, dbs, s0bs, s1bs, drs, s0rs, s1rs);
+}
+template <ArchType A, typename T, typename D, typename S>
+__aicore__ inline void muls_v(const D& dst, const S& s0, T s1, uint8_t r, uint16_t dbs, uint16_t sbs, uint16_t drs, uint16_t srs)
+{
+    muls_v<A, T>(ub_addr<T>(dst), ub_addr<T>(s0), s1, r, dbs, sbs, drs, srs);
+}
+template <ArchType A, typename T, typename D, typename S0, typename S1>
+__aicore__ inline void sub_v(const D& dst, const S0& s0, const S1& s1, uint8_t r, uint8_t dbs, uint8_t s0bs, uint8_t s1bs, uint8_t drs, uint8_t s0rs, uint8_t s1rs)
+{
+    sub_v<A, T>(ub_addr<T>(dst), ub_addr<T>(s0), ub_addr<T>(s1), r, dbs, s0bs, s1bs, drs, s0rs, s1rs);
+}
+template <ArchType A, typename T, typename D, typename S>
+__aicore__ inline void maxs_v(const D& dst, const S& s0, T s1, uint8_t r, uint16_t dbs, uint16_t sbs, uint16_t drs, uint16_t srs)
+{
+    maxs_v<A, T>(ub_addr<T>(dst), ub_addr<T>(s0), s1, r, dbs, sbs, drs, srs);
+}
+template <ArchType A, typename T, typename D, typename S>
+__aicore__ inline void mins_v(const D& dst, const S& s0, T s1, uint8_t r, uint16_t dbs, uint16_t sbs, uint16_t drs, uint16_t srs)
+{
+    mins_v<A, T>(ub_addr<T>(dst), ub_addr<T>(s0), s1, r, dbs, sbs, drs, srs);
+}
+template <ArchType A, typename T, typename D, typename S>
+__aicore__ inline void sqrt_v(const D& dst, const S& src, uint8_t r, uint16_t dbs, uint16_t sbs, uint16_t drs, uint16_t srs)
+{
+    sqrt_v<A, T>(ub_addr<T>(dst), ub_addr<T>(src), r, dbs, sbs, drs, srs);
+}
+template <ArchType A, typename T, typename D, typename S>
+__aicore__ inline void ln_v(const D& dst, const S& src, uint8_t r, uint16_t dbs, uint16_t sbs, uint16_t drs, uint16_t srs)
+{
+    ln_v<A, T>(ub_addr<T>(dst), ub_addr<T>(src), r, dbs, sbs, drs, srs);
+}
+template <ArchType A, typename T, typename D, typename S>
+__aicore__ inline void tranpose_v(const D& dst, const S& src)
+{
+    tranpose_v<A, T>(ub_addr<T>(dst), ub_addr<T>(src));
+}
+template <ArchType A, typename T, typename D, typename S>
+__aicore__ inline void cgmax_v(const D& dst, const S& src, int32_t r, int32_t drs, int32_t sbs, int32_t srs)
+{
+    cgmax_v<A, T>(ub_addr<T>(dst), ub_addr<T>(src), r, drs, sbs, srs);
+}
+template <ArchType A, typename T, typename D>
+__aicore__ inline void dup_v(const D& dst, T v, int32_t r)
+{
+    dup_v<A, T>(ub_addr<T>(dst), v, r);
 }
 #endif

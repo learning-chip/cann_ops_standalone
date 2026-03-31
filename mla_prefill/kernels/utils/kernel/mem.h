@@ -44,28 +44,65 @@ public:
                                                                            HardwareInfo<ArchTag>::l0BSize,
                                                                            HardwareInfo<ArchTag>::l0CSize};
 #ifdef __DAV_C220_VEC__
-        tensor[(uint32_t)BufferType::ASCEND_UB].InitBuffer(0, bufferSize[(uint32_t)BufferType::ASCEND_UB]);
-        tensor[(uint32_t)BufferType::ASCEND_UB].address_.logicPos = static_cast<uint8_t>(AscendC::TPosition::VECIN);
+        AscendC::TBuffAddr ubAddr{};
+        ubAddr.logicPos = static_cast<uint8_t>(AscendC::TPosition::VECIN);
+        ubAddr.dataLen = bufferSize[(uint32_t)BufferType::ASCEND_UB];
+        ubAddr.bufferHandle = 0;
+        tensor[(uint32_t)BufferType::ASCEND_UB].SetAddr(ubAddr);
 #elif defined(__DAV_C220_CUBE__)
-        tensor[(uint32_t)BufferType::ASCEND_CB].InitBuffer(0, bufferSize[(uint32_t)BufferType::ASCEND_CB]);
-        tensor[(uint32_t)BufferType::ASCEND_CB].address_.logicPos = static_cast<uint8_t>(AscendC::TPosition::A1);
-        tensor[(uint32_t)BufferType::ASCEND_L0A].InitBuffer(0, bufferSize[(uint32_t)BufferType::ASCEND_L0A]);
-        tensor[(uint32_t)BufferType::ASCEND_L0A].address_.logicPos = static_cast<uint8_t>(AscendC::TPosition::A2);
-        tensor[(uint32_t)BufferType::ASCEND_L0B].InitBuffer(0, bufferSize[(uint32_t)BufferType::ASCEND_L0B]);
-        tensor[(uint32_t)BufferType::ASCEND_L0B].address_.logicPos = static_cast<uint8_t>(AscendC::TPosition::B2);
-        tensor[(uint32_t)BufferType::ASCEND_L0C].InitBuffer(0, bufferSize[(uint32_t)BufferType::ASCEND_L0C]);
-        tensor[(uint32_t)BufferType::ASCEND_L0C].address_.logicPos = static_cast<uint8_t>(AscendC::TPosition::CO1);
+        AscendC::TBuffAddr cbAddr{};
+        cbAddr.logicPos = static_cast<uint8_t>(AscendC::TPosition::A1);
+        cbAddr.dataLen = bufferSize[(uint32_t)BufferType::ASCEND_CB];
+        cbAddr.bufferHandle = 0;
+        tensor[(uint32_t)BufferType::ASCEND_CB].SetAddr(cbAddr);
+
+        AscendC::TBuffAddr l0aAddr{};
+        l0aAddr.logicPos = static_cast<uint8_t>(AscendC::TPosition::A2);
+        l0aAddr.dataLen = bufferSize[(uint32_t)BufferType::ASCEND_L0A];
+        l0aAddr.bufferHandle = 0;
+        tensor[(uint32_t)BufferType::ASCEND_L0A].SetAddr(l0aAddr);
+
+        AscendC::TBuffAddr l0bAddr{};
+        l0bAddr.logicPos = static_cast<uint8_t>(AscendC::TPosition::B2);
+        l0bAddr.dataLen = bufferSize[(uint32_t)BufferType::ASCEND_L0B];
+        l0bAddr.bufferHandle = 0;
+        tensor[(uint32_t)BufferType::ASCEND_L0B].SetAddr(l0bAddr);
+
+        AscendC::TBuffAddr l0cAddr{};
+        l0cAddr.logicPos = static_cast<uint8_t>(AscendC::TPosition::CO1);
+        l0cAddr.dataLen = bufferSize[(uint32_t)BufferType::ASCEND_L0C];
+        l0cAddr.bufferHandle = 0;
+        tensor[(uint32_t)BufferType::ASCEND_L0C].SetAddr(l0cAddr);
 #else
-        tensor[(uint32_t)BufferType::ASCEND_UB].InitBuffer(0, bufferSize[(uint32_t)BufferType::ASCEND_UB]);
-        tensor[(uint32_t)BufferType::ASCEND_UB].address_.logicPos = static_cast<uint8_t>(AscendC::TPosition::VECIN);
-        tensor[(uint32_t)BufferType::ASCEND_CB].InitBuffer(0, bufferSize[(uint32_t)BufferType::ASCEND_CB]);
-        tensor[(uint32_t)BufferType::ASCEND_CB].address_.logicPos = static_cast<uint8_t>(AscendC::TPosition::A1);
-        tensor[(uint32_t)BufferType::ASCEND_L0A].InitBuffer(0, bufferSize[(uint32_t)BufferType::ASCEND_L0A]);
-        tensor[(uint32_t)BufferType::ASCEND_L0A].address_.logicPos = static_cast<uint8_t>(AscendC::TPosition::A2);
-        tensor[(uint32_t)BufferType::ASCEND_L0B].InitBuffer(0, bufferSize[(uint32_t)BufferType::ASCEND_L0B]);
-        tensor[(uint32_t)BufferType::ASCEND_L0B].address_.logicPos = static_cast<uint8_t>(AscendC::TPosition::B2);
-        tensor[(uint32_t)BufferType::ASCEND_L0C].InitBuffer(0, bufferSize[(uint32_t)BufferType::ASCEND_L0C]);
-        tensor[(uint32_t)BufferType::ASCEND_L0C].address_.logicPos = static_cast<uint8_t>(AscendC::TPosition::CO1);
+        AscendC::TBuffAddr ubAddr{};
+        ubAddr.logicPos = static_cast<uint8_t>(AscendC::TPosition::VECIN);
+        ubAddr.dataLen = bufferSize[(uint32_t)BufferType::ASCEND_UB];
+        ubAddr.bufferHandle = 0;
+        tensor[(uint32_t)BufferType::ASCEND_UB].SetAddr(ubAddr);
+
+        AscendC::TBuffAddr cbAddr{};
+        cbAddr.logicPos = static_cast<uint8_t>(AscendC::TPosition::A1);
+        cbAddr.dataLen = bufferSize[(uint32_t)BufferType::ASCEND_CB];
+        cbAddr.bufferHandle = 0;
+        tensor[(uint32_t)BufferType::ASCEND_CB].SetAddr(cbAddr);
+
+        AscendC::TBuffAddr l0aAddr{};
+        l0aAddr.logicPos = static_cast<uint8_t>(AscendC::TPosition::A2);
+        l0aAddr.dataLen = bufferSize[(uint32_t)BufferType::ASCEND_L0A];
+        l0aAddr.bufferHandle = 0;
+        tensor[(uint32_t)BufferType::ASCEND_L0A].SetAddr(l0aAddr);
+
+        AscendC::TBuffAddr l0bAddr{};
+        l0bAddr.logicPos = static_cast<uint8_t>(AscendC::TPosition::B2);
+        l0bAddr.dataLen = bufferSize[(uint32_t)BufferType::ASCEND_L0B];
+        l0bAddr.bufferHandle = 0;
+        tensor[(uint32_t)BufferType::ASCEND_L0B].SetAddr(l0bAddr);
+
+        AscendC::TBuffAddr l0cAddr{};
+        l0cAddr.logicPos = static_cast<uint8_t>(AscendC::TPosition::CO1);
+        l0cAddr.dataLen = bufferSize[(uint32_t)BufferType::ASCEND_L0C];
+        l0cAddr.bufferHandle = 0;
+        tensor[(uint32_t)BufferType::ASCEND_L0C].SetAddr(l0cAddr);
 #endif
     };
 

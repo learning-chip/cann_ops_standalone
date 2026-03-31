@@ -59,6 +59,23 @@ struct LocalTensorView {
     __aicore__ inline operator AscendC::LocalTensor<T>() const { return t; }
 };
 
+template <typename T>
+struct RawAddrTensorView {
+    uint64_t addr{0};
+    __aicore__ RawAddrTensorView() = default;
+    __aicore__ explicit RawAddrTensorView(uint64_t in) : addr(in) {}
+    __aicore__ inline uint64_t GetPhyAddr() const { return addr; }
+    __aicore__ inline RawAddrTensorView<T> operator[](uint64_t offset) const
+    {
+        return RawAddrTensorView<T>(addr + offset * sizeof(T));
+    }
+    template <typename U>
+    __aicore__ inline RawAddrTensorView<U> ReinterpretCast() const
+    {
+        return RawAddrTensorView<U>(addr);
+    }
+};
+
 template <ArchType ArchTag>
 struct AsdopsBuffer {
 public:
@@ -137,22 +154,25 @@ public:
 
 template <ArchType ArchTag, typename DType>
 struct gm_to_ub_align {
-    __aicore__ inline gm_to_ub_align(LocalTensorView<DType> dstTensor, AscendC::GlobalTensor<DType> srcTensor,
+    __aicore__ inline gm_to_ub_align(LocalTensorView<DType> dstTensor, __gm__ DType *srcTensor,
                                      uint8_t sid, uint16_t nBurst, uint32_t lenBurst, uint8_t leftPaddingNum,
                                      uint8_t rightPaddingNum, uint32_t srcGap, uint32_t dstGap)
     {
-        AscendC::DataCopyPad(dstTensor.t, srcTensor, AscendC::DataCopyExtParams(nBurst, lenBurst, srcGap, dstGap, 0),
-                             AscendC::DataCopyPadExtParams<DType>(false, leftPaddingNum, rightPaddingNum, 0));
+        (void)leftPaddingNum;
+        (void)rightPaddingNum;
+        copy_gm_to_ubuf((__ubuf__ DType *)(dstTensor.GetPhyAddr()), srcTensor, sid, nBurst, lenBurst / 32, srcGap / 32, dstGap / 32);
     };
 };
 
 template <ArchType ArchTag, typename DType>
 struct ub_to_gm_align {
-    __aicore__ inline ub_to_gm_align(AscendC::GlobalTensor<DType> dstTensor, LocalTensorView<DType> srcTensor,
+    __aicore__ inline ub_to_gm_align(__gm__ DType *dstTensor, LocalTensorView<DType> srcTensor,
                                      uint8_t sid, uint16_t nBurst, uint32_t lenBurst, uint8_t leftPaddingNum,
                                      uint8_t rightPaddingNum, uint32_t srcGap, uint32_t dstGap)
     {
-        AscendC::DataCopyPad(dstTensor, srcTensor.t, AscendC::DataCopyExtParams(nBurst, lenBurst, srcGap, dstGap, 0));
+        (void)leftPaddingNum;
+        (void)rightPaddingNum;
+        copy_ubuf_to_gm(dstTensor, (__ubuf__ DType *)(srcTensor.GetPhyAddr()), sid, nBurst, lenBurst / 32, srcGap / 32, dstGap / 32);
     };
 };
 
@@ -168,14 +188,6 @@ __aicore__ __attribute__((always_inline)) inline void ub_to_gm_raw(
     __gm__ T *dst, const LocalTensorView<T> &src, uint32_t n_burst, uint32_t len_burst)
 {
     copy_ubuf_to_gm(dst, (__ubuf__ T *)(src.GetPhyAddr()), 0, n_burst, len_burst, 0, 0);
-}
-
-template <typename T>
-__aicore__ __attribute__((always_inline)) inline AscendC::GlobalTensor<T> make_gm_tensor(__gm__ T *ptr)
-{
-    AscendC::GlobalTensor<T> t;
-    t.SetGlobalBuffer(ptr);
-    return t;
 }
 
 #ifdef __DAV_C220_CUBE__
@@ -371,8 +383,9 @@ public:
         PIPE_BARRIER(ALL);
     }
 
+    template <typename DstTensorView, typename SrcTensorView>
     __aicore__ __attribute__((always_inline)) inline void LoadDataToCa(
-        LocalTensorView<QKV_DT> dst_tensor, LocalTensorView<QKV_DT> src_tensor,
+        DstTensorView dst_tensor, SrcTensorView src_tensor,
         uint32_t round_k, uint32_t qk_round_m, uint32_t qk_m)
     {
         uint32_t round_row = RoundUp<uint32_t>(round_k, 32 / sizeof(QKV_DT));
@@ -767,16 +780,19 @@ private:
     const uint32_t l1v_buf_addr_offset = 4 * L0AB_UINT8_BLOCK_SIZE;
     const uint32_t l1p_buf_addr_offset = 12 * L0AB_UINT8_BLOCK_SIZE;
 
-    AsdopsBuffer<ArchType::ASCEND_V220> buf;
+    using L1View = RawAddrTensorView<QKV_DT>;
+    using L0AView = RawAddrTensorView<QKV_DT>;
+    using L0BView = RawAddrTensorView<QKV_DT>;
+    using L0CView = RawAddrTensorView<float>;
 
-    LocalTensorView<QKV_DT> l1q_buf_addr_tensor = buf.GetBuffer<BufferType::ASCEND_CB, QKV_DT>(l1q_buf_addr_offset);
-    LocalTensorView<QKV_DT> l1k_buf_addr_tensor = buf.GetBuffer<BufferType::ASCEND_CB, QKV_DT>(l1k_buf_addr_offset);
-    LocalTensorView<QKV_DT> l1p_buf_addr_tensor = buf.GetBuffer<BufferType::ASCEND_CB, QKV_DT>(l1p_buf_addr_offset);
-    LocalTensorView<QKV_DT> l1v_buf_addr_tensor = buf.GetBuffer<BufferType::ASCEND_CB, QKV_DT>(l1v_buf_addr_offset);
+    L1View l1q_buf_addr_tensor{(uint64_t)reinterpret_cast<__cbuf__ QKV_DT *>((uintptr_t)l1q_buf_addr_offset)};
+    L1View l1k_buf_addr_tensor{(uint64_t)reinterpret_cast<__cbuf__ QKV_DT *>((uintptr_t)l1k_buf_addr_offset)};
+    L1View l1p_buf_addr_tensor{(uint64_t)reinterpret_cast<__cbuf__ QKV_DT *>((uintptr_t)l1p_buf_addr_offset)};
+    L1View l1v_buf_addr_tensor{(uint64_t)reinterpret_cast<__cbuf__ QKV_DT *>((uintptr_t)l1v_buf_addr_offset)};
 
-    LocalTensorView<QKV_DT> l0a_buf_tensor = buf.GetBuffer<BufferType::ASCEND_L0A, QKV_DT>(0);
-    LocalTensorView<QKV_DT> l0b_buf_tensor = buf.GetBuffer<BufferType::ASCEND_L0B, QKV_DT>(0);
-    LocalTensorView<float> l0c_buf_tensor = buf.GetBuffer<BufferType::ASCEND_L0C, float>(0);
+    L0AView l0a_buf_tensor{(uint64_t)reinterpret_cast<__ca__ QKV_DT *>((uintptr_t)0)};
+    L0BView l0b_buf_tensor{(uint64_t)reinterpret_cast<__cb__ QKV_DT *>((uintptr_t)0)};
+    L0CView l0c_buf_tensor{(uint64_t)reinterpret_cast<__cc__ float *>((uintptr_t)0)};
 
     uint32_t batch_size{0};
     uint32_t max_seqlen{0};
@@ -1369,8 +1385,8 @@ public:
                                 // 搬16 * 512, 压缩mask 512,512
                                 gm_to_ub_align<ArchType::ASCEND_V220, IN_DATA_TYPE>(
                                     mask_ubuf_tensor,
-                                    make_gm_tensor(((__gm__ IN_DATA_TYPE *)mask_gm) + cmp_mask_offset +
-                                                   (sub_block_idx * qk_m / 2 + m_ind * m_slice) * 512),
+                                    ((__gm__ IN_DATA_TYPE *)mask_gm) + cmp_mask_offset +
+                                        (sub_block_idx * qk_m / 2 + m_ind * m_slice) * 512,
                                     0,                       // sid
                                     curr_m,                   // nBurst
                                     qk_n * 2,                // lenBurst
@@ -1386,8 +1402,8 @@ public:
                                 WAIT_FLAG(V, MTE2, EVENT_ID6);
                                 gm_to_ub_align<ArchType::ASCEND_V220, IN_DATA_TYPE>(
                                     mask_ubuf_tensor,
-                                    make_gm_tensor(((__gm__ IN_DATA_TYPE *)mask_gm) + mask_offset +
-                                                   (sub_block_idx * qk_m / 2 + m_ind * m_slice) * max_seqlen),
+                                    ((__gm__ IN_DATA_TYPE *)mask_gm) + mask_offset +
+                                        (sub_block_idx * qk_m / 2 + m_ind * m_slice) * max_seqlen,
                                     0,                       // sid
                                     curr_m,                   // nBurst
                                     qk_n * 2,                // lenBurst
@@ -1586,7 +1602,7 @@ public:
                         WAIT_FLAG(V, MTE3, EVENT_ID0);
                         __gm__ IN_DATA_TYPE *o_gm_ptr = (__gm__ IN_DATA_TYPE *)o_gm;
                         ub_to_gm_align<ArchType::ASCEND_V220, IN_DATA_TYPE>(
-                            make_gm_tensor(o_gm_ptr + o_offset + (uint64_t)sub_block_idx * qk_m / 2 * stride_qo),
+                            o_gm_ptr + o_offset + (uint64_t)sub_block_idx * qk_m / 2 * stride_qo,
                             go_ubuf_tensor.ReinterpretCast<IN_DATA_TYPE>(),
                             0,                    // sid
                             sub_m,                // nBurst
