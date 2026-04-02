@@ -14,11 +14,20 @@ def as_ptr(t: torch.Tensor) -> ctypes.c_void_p:
     return ctypes.c_void_p(t.data_ptr())
 
 
-def check_close(name: str, actual: torch.Tensor, ref: torch.Tensor, tol: float = 1e-5) -> None:
-    max_abs = (actual - ref).abs().max().item()
-    mean_abs = (actual - ref).abs().mean().item()
+def check_close(
+    name: str,
+    actual: torch.Tensor,
+    ref: torch.Tensor,
+    tol: float = 1e-5,
+    mean_tol: float | None = None,
+) -> None:
+    diff = (actual - ref).abs()
+    max_abs = diff.max().item()
+    mean_abs = diff.mean().item()
     print(f"{name}: max_abs={max_abs:.6e} mean_abs={mean_abs:.6e}")
     assert max_abs <= tol, f"{name} mismatch max_abs={max_abs}"
+    if mean_tol is not None:
+        assert mean_abs <= mean_tol, f"{name} mean_abs too large: {mean_abs} (max_abs={max_abs})"
 
 
 def default_matmul_tiling(ai_core_num: int, dim: int) -> TCubeTiling:

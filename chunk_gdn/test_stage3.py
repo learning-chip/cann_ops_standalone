@@ -153,8 +153,14 @@ def run_case(device: str) -> None:
     out_ref_fp = attn_inter[0] + contrib
     out_ref = out_ref_fp.to(torch.bfloat16)
 
-    # bf16 output vs float reference: allow ~0.5 max abs on worst elements after cast.
-    check_close("stage3_out", out_bf16[:, 0, :].to(torch.float32), out_ref[:, :].to(torch.float32), tol=0.5)
+    # bf16 vs float: max error can be large on a few elements after cast; mean should stay tight.
+    check_close(
+        "stage3_out",
+        out_bf16[:, 0, :].to(torch.float32),
+        out_ref[:, :].to(torch.float32),
+        tol=0.5,
+        mean_tol=0.1,
+    )
 
 
 if __name__ == "__main__":
