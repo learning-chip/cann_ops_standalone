@@ -51,17 +51,37 @@ python ./benchmark_stage_kernels.py
 
 Output: `benchmark_stage_kernels.csv`
 
-Shapes used now match the stable end-to-end family: `nk=nv=4`, `dk=dv=64`, `chunk=64`, gamma enabled.
+`benchmark_stage_kernels.py` now benchmarks a broader case matrix and records end-to-end staged correctness stats (`out/state` max/mean abs error vs the bf16 torch reference) for each case before timing Stage1 / Stage2 / Stage3.
 
 ### Measured Snapshot
 
 Hardware / run: Ascend **910B2**, `NPU_ID=7`, **2026-04-03**
 
-| T | Stage1 ms | S1 TFLOP/s | S1 GiB/s | Stage2 ms | S2 TFLOP/s | S2 GiB/s | Stage3 ms | S3 TFLOP/s | S3 GiB/s |
-|---|-----------|------------|----------|-----------|------------|----------|-----------|------------|----------|
-| 4096 | 0.230 | 1.75 | 114.27 | 0.272 | 3.95 | 72.27 | 0.208 | 2.58 | 69.51 |
-| 16384 | 0.914 | 1.76 | 112.58 | 0.889 | 4.83 | 88.26 | 0.249 | 8.61 | 223.28 |
-| 65536 | 3.561 | 1.81 | 114.99 | 4.295 | 4.00 | 73.01 | 1.032 | 8.33 | 213.73 |
+| Case | B x S | nk/nv | dk/dv | chunk | S1 TFLOP/s | S1 GiB/s | S2 TFLOP/s | S2 GiB/s | S3 TFLOP/s | S3 GiB/s | out max | state max |
+|------|-------|-------|-------|-------|------------|----------|------------|----------|------------|----------|---------|-----------|
+| b1_s4096_h4_d64_c64 | 1 x 4096 | 4 / 4 | 64 / 64 | 64 | 1.69 | 110.49 | 3.72 | 68.05 | 2.44 | 65.67 | 0.197 | 0.173 |
+| b1_s8192_h16_d64_c64 | 1 x 8192 | 16 / 16 | 64 / 64 | 64 | 3.10 | 197.45 | 12.25 | 223.95 | 10.63 | 273.62 | 0.340 | 0.375 |
+| b1_s4096_h32_d64_c64 | 1 x 4096 | 32 / 32 | 64 / 64 | 64 | 3.45 | 219.44 | 12.18 | 222.91 | 9.87 | 254.23 | 0.346 | 0.404 |
+| b1_s2048_h64_d64_c64 | 1 x 2048 | 64 / 64 | 64 / 64 | 64 | 3.45 | 219.65 | 14.62 | 268.39 | 10.23 | 263.42 | 0.375 | 0.307 |
+| b8_s2048_h16_d64_c64 | 8 x 2048 | 16 / 16 | 64 / 64 | 64 | 2.87 | 184.99 | 13.07 | 239.98 | 8.89 | 233.58 | 0.594 | 0.378 |
+| b32_s1024_h16_d64_c64 | 32 x 1024 | 16 / 16 | 64 / 64 | 64 | 2.54 | 165.99 | 9.12 | 168.40 | 5.28 | 142.37 | 0.515 | 0.352 |
+| b128_s256_h16_d64_c64 | 128 x 256 | 16 / 16 | 64 / 64 | 64 | 1.49 | 105.07 | 2.18 | 41.73 | 1.38 | 42.78 | 0.452 | 0.420 |
+| b8_s1024_h32_d64_c64 | 8 x 1024 | 32 / 32 | 64 / 64 | 64 | 3.09 | 198.86 | 12.96 | 239.44 | 7.74 | 203.22 | 0.381 | 0.309 |
+
+### Best Observed Utilization
+
+- Highest Stage1 TFLOP/s: `3.45` on `b1_s2048_h64_d64_c64`
+- Highest Stage1 GiB/s: `219.65` on `b1_s2048_h64_d64_c64`
+- Highest Stage2 TFLOP/s: `14.62` on `b1_s2048_h64_d64_c64`
+- Highest Stage2 GiB/s: `268.39` on `b1_s2048_h64_d64_c64`
+- Highest Stage3 TFLOP/s: `10.63` on `b1_s8192_h16_d64_c64`
+- Highest Stage3 GiB/s: `273.62` on `b1_s8192_h16_d64_c64`
+
+Takeaways:
+
+- Increasing `nk=nv` from `4` to `16-64` is the strongest lever for device utilization on the working stage kernels.
+- Larger host-side batch replay (`B=8/32/128`) does **not** help as much as increasing heads; repeated small per-sequence launches reduce effective utilization.
+- On this host, the stable high-throughput region is still `dk=dv=64`, `chunk=64`.
 
 ## Notes
 
@@ -69,4 +89,5 @@ Hardware / run: Ascend **910B2**, `NPU_ID=7`, **2026-04-03**
 - `ai_core_num_from_device()` now uses the full `cube_core_num` reported by the device, rather than dividing it by `3`.
 - `stage2_kernel.cpp` and `stage3_kernel.cpp` now propagate `tilingData.hasGamma`, which fixes the gamma-enabled all-stage benchmark path.
 - `test_chunk_gdn.py` validates the staged custom path against the bf16 torch reference with relaxed max/mean-abs thresholds that match the observed cast error envelope of the standalone staged kernels.
+- The broader stage sweep showed that `dk=dv=128` and `chunk=128` still fault on this 910B2 / CANN stack, so they are not included in the measured matrix above.
 - The legacy monolithic `chunk_gdn_lib.so` source is still present in the tree for debugging, but the supported benchmark/test path is the staged custom pipeline built by `compile.sh`.
