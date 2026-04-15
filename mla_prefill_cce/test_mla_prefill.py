@@ -2,10 +2,7 @@ import ctypes
 import csv
 import math
 import os
-<<<<<<< Updated upstream
-=======
 import zlib
->>>>>>> Stashed changes
 
 import numpy as np
 import torch
@@ -295,8 +292,6 @@ def estimate_flops(batch: int, heads: int, q_seq: int, kv_seq: int, embd: int, e
     return qk + pv
 
 
-<<<<<<< Updated upstream
-=======
 def estimate_flops_fused_infer(batch: int, heads: int, q_seq: int, kv_seq: int, head_dim: int) -> float:
     """FLOPs for standard MHA as in `torch_npu.npu_fused_infer_attention_score` (QK + PV matmuls, same head_dim)."""
     qk = 2.0 * batch * heads * q_seq * kv_seq * head_dim
@@ -337,7 +332,6 @@ def bnsd128_to_mla_packed(
     return q_flat, k_flat, v_flat, rope_pad_q, rope_pad_k
 
 
->>>>>>> Stashed changes
 def run_benchmarks():
     device = "npu"
     dtype = torch.float16
@@ -345,13 +339,8 @@ def run_benchmarks():
     here = os.path.dirname(os.path.abspath(__file__))
     lib = load_kernel(os.path.join(here, "mla_prefill_lib.so"))
 
-    # Larger shapes for higher FLOP rates while staying within reasonable memory.
-<<<<<<< Updated upstream
-    # Additional cases push FLOPs higher; cases that fail numerical checks are skipped below.
-    cases = [
-=======
-    # All APIs use the same random BNSD tensors (D=128); MLA path pads Q/K to 192 with zero rope slots.
-    # Throughput uses a common FLOP count (128-dim attention) so TFLOP/s is comparable across kernels.
+    # Same random BNSD tensors (D=128) for custom MLA and `npu_fused_infer_attention_score`; MLA packs Q/K to 192 with rope.
+    # TFLOP/s uses a shared FLOP count (`flops_theory_attn128`) so MLA vs fused throughput is comparable.
     attn_head_dim = 128
     cases = [
         {
@@ -364,7 +353,6 @@ def run_benchmarks():
             "q_seq": 1,
             "kv_seq": 2048,
         },
->>>>>>> Stashed changes
         {"name": "prefill_b4_h16_s256", "batch": 4, "heads": 16, "kv_heads": 16, "embd": 192, "embdv": 128, "q_seq": 256, "kv_seq": 256},
         {"name": "prefill_b4_h16_s512", "batch": 4, "heads": 16, "kv_heads": 16, "embd": 192, "embdv": 128, "q_seq": 512, "kv_seq": 512},
         {"name": "prefill_b4_h16_s768", "batch": 4, "heads": 16, "kv_heads": 16, "embd": 192, "embdv": 128, "q_seq": 768, "kv_seq": 768},
@@ -389,11 +377,6 @@ def run_benchmarks():
         kv_seq = case["kv_seq"]
         q_tokens = batch * q_seq
 
-<<<<<<< Updated upstream
-        q = torch.randn(q_tokens, heads * embd, dtype=dtype, device=device)
-        k = torch.randn(1, batch, kv_seq, kv_heads * embd, dtype=dtype, device=device)
-        v = torch.randn(1, batch, kv_seq, kv_heads * embdv, dtype=dtype, device=device)
-=======
         gen = torch.Generator(device=device)
         gen.manual_seed(
             (zlib.crc32(case["name"].encode("utf-8")) & 0xFFFFFFFF) ^ (batch << 20) ^ (heads << 10) ^ q_seq ^ kv_seq
@@ -403,7 +386,6 @@ def run_benchmarks():
         fv = torch.randn(batch, heads, kv_seq, attn_head_dim, dtype=dtype, device=device, generator=gen)
 
         q, k, v, query_rope, key_rope = bnsd128_to_mla_packed(fq, fk, fv, batch, heads, q_seq, kv_seq, dtype, device)
->>>>>>> Stashed changes
         q_split1, q_split2, k_split1, k_split2 = split_qk_for_mla(q, k, heads, kv_heads)
         mask = make_empty(device, dtype)
         alibi = make_empty(device, torch.float32)
@@ -413,13 +395,9 @@ def run_benchmarks():
         off_pv = make_empty(device, torch.int32)
         quant_p = make_empty(device, torch.float32)
         log_n = make_empty(device, torch.float32)
-<<<<<<< Updated upstream
-        tor = 1.0 / math.sqrt(float(embd))
-=======
-        # Same softmax scaling as SDPA / fused on the 128-dim attention (padded Q/K have zero last-64).
+        # Same softmax scaling as fused on the 128-dim nope path (rope slots are zero).
         attn_scale = 1.0 / math.sqrt(float(attn_head_dim))
         tor = attn_scale
->>>>>>> Stashed changes
         tiling = make_prefill_tiling(
             batch=batch,
             q_seqlens=[q_seq] * batch,
@@ -469,33 +447,9 @@ def run_benchmarks():
                 as_ptr(tiling),
             )
 
-        def run_ref():
-<<<<<<< Updated upstream
-            scale = 1.0 / math.sqrt(float(embd))
-            q_bmh = q.view(batch, q_seq, heads, embd).transpose(1, 2)
-            k_bmh = k[0].view(batch, kv_seq, kv_heads, embd).transpose(1, 2)
-            v_bmh = v[0].view(batch, kv_seq, kv_heads, embdv).transpose(1, 2)
-            o_ref_local = torch.nn.functional.scaled_dot_product_attention(
-                q_bmh, k_bmh, v_bmh, attn_mask=None, dropout_p=0.0, is_causal=False, scale=scale
-            )
-            return o_ref_local.transpose(1, 2).contiguous().view(q_tokens, heads * embdv)
-
-=======
-            o_ref_local = torch.nn.functional.scaled_dot_product_attention(
-                fq,
-                fk,
-                fv,
-                attn_mask=None,
-                dropout_p=0.0,
-                is_causal=False,
-                scale=attn_scale,
-            )
-            return o_ref_local.transpose(1, 2).contiguous().view(q_tokens, heads * embdv)
-
         def run_npu_fused():
-            # MLA-aligned split: query/key = nope (128), query_rope/key_rope = rope (64), same tensors as packed into `q`/`k`.
-            # Omit key_rope_antiquant_scale for fp16 NO_QUANT (CANN tiling requires null; op-plugin tests sometimes pass a tensor).
-            torch_npu.npu_fused_infer_attention_score(
+            # MLA-aligned split; omit key_rope_antiquant_scale for fp16 NO_QUANT (CANN tiling).
+            return torch_npu.npu_fused_infer_attention_score(
                 fq,
                 fk,
                 fv,
@@ -509,9 +463,7 @@ def run_benchmarks():
                 softmax_lse_flag=True,
             )
 
->>>>>>> Stashed changes
         # NOTE: Some large prefill shapes can trigger runtime/device errors on certain environments.
-        # TODO: Revisit these skipped cases after kernel/tiling stability is improved.
         try:
             run_custom()
             torch.npu.synchronize()
@@ -519,13 +471,22 @@ def run_benchmarks():
             print(f"WARNING[{case['name']}]: skipped due to runtime error during correctness run: {e}")
             skipped_cases.append(case["name"])
             continue
-        o_ref = run_ref()
-        mean_abs_err = torch.mean(torch.abs(o.float() - o_ref.float())).item()
-        max_abs_err = torch.max(torch.abs(o.float() - o_ref.float())).item()
-        if max_abs_err > error_warn_threshold:
+
+        try:
+            fused_out = run_npu_fused()
+            torch.npu.synchronize()
+            o_fused = fused_out[0].transpose(1, 2).contiguous().view(q_tokens, heads * embdv)
+        except RuntimeError as e:
+            print(f"WARNING[{case['name']}]: skipped — npu_fused_infer_attention_score failed: {e}")
+            skipped_cases.append(case["name"])
+            continue
+
+        mean_abs_err_mla_vs_fused = torch.mean(torch.abs(o.float() - o_fused.float())).item()
+        max_abs_err_mla_vs_fused = torch.max(torch.abs(o.float() - o_fused.float())).item()
+        if max_abs_err_mla_vs_fused > error_warn_threshold:
             print(
-                f"WARNING[{case['name']}]: skipped due to large error "
-                f"(mean_abs_err={mean_abs_err:.6f}, max_abs_err={max_abs_err:.6f}, "
+                f"WARNING[{case['name']}]: skipped due to large MLA vs fused error "
+                f"(mean_abs_err={mean_abs_err_mla_vs_fused:.6f}, max_abs_err={max_abs_err_mla_vs_fused:.6f}, "
                 f"threshold={error_warn_threshold:.6f})"
             )
             skipped_cases.append(case["name"])
@@ -537,46 +498,10 @@ def run_benchmarks():
             print(f"WARNING[{case['name']}]: skipped due to runtime error during timing run: {e}")
             skipped_cases.append(case["name"])
             continue
-        ref_ms = benchmark_with_events(run_ref)
-<<<<<<< Updated upstream
-        flops = estimate_flops(batch, heads, q_seq, kv_seq, embd, embdv)
-        custom_tflops = flops / (custom_ms * 1e-3) / 1e12
-        ref_tflops = flops / (ref_ms * 1e-3) / 1e12
-        print(
-            f"[{case['name']}] custom={custom_ms:.3f} ms ({custom_tflops:.4f} TFLOP/s), "
-            f"torch_ref={ref_ms:.3f} ms ({ref_tflops:.4f} TFLOP/s), "
-            f"mean_abs_err={mean_abs_err:.6f}, max_abs_err={max_abs_err:.6f}"
-        )
-        results.append(
-            {
-                "case": case["name"],
-                "batch": batch,
-                "heads": heads,
-                "kv_heads": kv_heads,
-                "q_seq": q_seq,
-                "kv_seq": kv_seq,
-                "embd": embd,
-                "embdv": embdv,
-                "block_dim": BLOCK_DIM,
-                "custom_ms": custom_ms,
-                "torch_ref_ms": ref_ms,
-                "custom_tflops": custom_tflops,
-                "torch_ref_tflops": ref_tflops,
-                "mean_abs_err": mean_abs_err,
-                "max_abs_err": max_abs_err,
-            }
-        )
-
-    if results:
-        csv_path = os.path.join(here, "benchmark_mla_prefill.csv")
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=list(results[0].keys()))
-=======
 
         flops_attn128 = estimate_flops_fused_infer(batch, heads, q_seq, kv_seq, attn_head_dim)
         flops_mla_hw = estimate_flops(batch, heads, q_seq, kv_seq, embd, embdv)
-        custom_tflops_attn128 = flops_attn128 / (custom_ms * 1e-3) / 1e12
-        torch_ref_tflops_attn128 = flops_attn128 / (ref_ms * 1e-3) / 1e12
+        mla_tflops_attn128 = flops_attn128 / (custom_ms * 1e-3) / 1e12
 
         npu_fused_ms = None
         npu_fused_tflops_attn128 = None
@@ -595,11 +520,10 @@ def run_benchmarks():
         fused_ms_s = f"{npu_fused_ms:.3f}" if npu_fused_ms is not None else "n/a"
         fused_tf_s = f"{npu_fused_tflops_attn128:.4f}" if npu_fused_tflops_attn128 is not None else "n/a"
         print(
-            f"[{case['name']}] mla_kernel={custom_ms:.3f} ms ({custom_tflops_attn128:.4f} TFLOP/s @ attn128 FLOPs), "
-            f"sdpa={ref_ms:.3f} ms ({torch_ref_tflops_attn128:.4f}), "
+            f"[{case['name']}] mla_kernel={custom_ms:.3f} ms ({mla_tflops_attn128:.4f} TFLOP/s @ attn128 FLOPs), "
             f"npu_fused_infer={fused_ms_s} ms ({fused_tf_s}), "
             f"flops_attn128={flops_attn128:.6e}, flops_mla_hw={flops_mla_hw:.6e}, "
-            f"mean_abs_err={mean_abs_err:.6f}, max_abs_err={max_abs_err:.6f}"
+            f"mla_vs_fused mean_abs_err={mean_abs_err_mla_vs_fused:.6f}, max_abs_err={max_abs_err_mla_vs_fused:.6f}"
         )
         row = {
             "case": case["name"],
@@ -615,13 +539,11 @@ def run_benchmarks():
             "flops_theory_attn128": flops_attn128,
             "flops_theory_mla_hw": flops_mla_hw,
             "mla_ms": custom_ms,
-            "sdpa_ms": ref_ms,
             "npu_fused_infer_ms": npu_fused_ms if npu_fused_ms is not None else "",
-            "mla_tflops_attn128": custom_tflops_attn128,
-            "sdpa_tflops_attn128": torch_ref_tflops_attn128,
+            "mla_tflops_attn128": mla_tflops_attn128,
             "npu_fused_tflops_attn128": npu_fused_tflops_attn128 if npu_fused_tflops_attn128 is not None else "",
-            "mean_abs_err": mean_abs_err,
-            "max_abs_err": max_abs_err,
+            "mean_abs_err_mla_vs_fused": mean_abs_err_mla_vs_fused,
+            "max_abs_err_mla_vs_fused": max_abs_err_mla_vs_fused,
         }
         results.append(row)
 
@@ -641,17 +563,14 @@ def run_benchmarks():
             "flops_theory_attn128",
             "flops_theory_mla_hw",
             "mla_ms",
-            "sdpa_ms",
             "npu_fused_infer_ms",
             "mla_tflops_attn128",
-            "sdpa_tflops_attn128",
             "npu_fused_tflops_attn128",
-            "mean_abs_err",
-            "max_abs_err",
+            "mean_abs_err_mla_vs_fused",
+            "max_abs_err_mla_vs_fused",
         ]
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=csv_fields, extrasaction="ignore")
->>>>>>> Stashed changes
             writer.writeheader()
             writer.writerows(results)
         print(f"wrote benchmark csv: {csv_path}")

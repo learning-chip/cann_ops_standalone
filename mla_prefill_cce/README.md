@@ -17,22 +17,11 @@ mean abs diff vs ref: 0.000083
 max abs diff vs ref: 0.000854
 tor example: 0.072169
 ```
-<<<<<<< Updated upstream
-=======
 
-## TFLOP/s comparison (measured)
+## TFLOP/s and accuracy (measured)
 
-`python ./test_mla_prefill.py` runs benchmarks and writes `benchmark_mla_prefill.csv`. The three APIs are timed on the **same** random half-precision BNSD tensors (`fq`, `fk`, `fv` with head size 128): the MLA path pads Q/K to 192 with zeros in the rope slots and uses the same softmax scale `1/sqrt(128)` as `torch.nn.functional.scaled_dot_product_attention` and `torch_npu.npu_fused_infer_attention_score`. Throughput is reported as **TFLOP/s using a shared FLOP count** (`flops_theory_attn128`: standard two matmuls at head size 128), so the three columns are directly comparable for the same logical attention workload.
+`python ./test_mla_prefill.py` writes `benchmark_mla_prefill.csv`. The **custom MLA** kernel and **`npu_fused_infer_attention_score`** use the same random half-precision inputs: BNSD `fq` / `fk` / `fv` (head size 128), with `query_rope` / `key_rope` (64-wide, zero-padded) matching the packed MLA Q/K layout. Throughput uses a shared **`flops_theory_attn128`** (two matmuls at head size 128) for both `mla_tflops_attn128` and `npu_fused_tflops_attn128`. **`flops_theory_mla_hw`** records the heavier MLA Q/K (192) + V (128) FLOP count for the custom kernel.
 
-Representative numbers from a full run on this repo’s benchmark matrix (see the CSV for exact rows):
+Numerical columns **`mean_abs_err_mla_vs_fused`** and **`max_abs_err_mla_vs_fused`** compare the MLA output tensor to the fused op’s attention output on those same inputs.
 
-| Role | TFLOP/s range (attn-128 basis) | Notes |
-|------|----------------------------------|--------|
-| MLA prefill kernel | ~0.23–92 | Highest on several smaller or mid-sized shapes (e.g. B4×H16 up to S768); often leads **SDPA** and **`npu_fused_infer_attention_score`** there. |
-| SDPA (NPU) | ~0.17–136 | Catches up or exceeds MLA on larger sequences (e.g. S1024, and many B8/B16 cases in this run). |
-| `npu_fused_infer_attention_score` | ~0.17–138 | Close to SDPA on many rows; best TFLOP/s on some high-head cases (e.g. B8×H32 S512 in this CSV). |
-
-**Tiny IFA-style point** (B1, H32, Q1, KV2048): MLA ~0.23 TFLOP/s vs SDPA and fused ~0.17 TFLOP/s on the same tensors (same run).
-
-**Caveats:** Figures depend on device, CANN/torch_npu build, and clock; rerun locally for your hardware. The MLA kernel still performs extra arithmetic in the 192-wide Q/K path; `flops_theory_mla_hw` in the CSV is the heavier FLOP estimate for that implementation, while the three TFLOP/s columns use the shared attn-128 denominator for cross-API comparison.
->>>>>>> Stashed changes
+Figures depend on device, CANN/torch_npu build, and clock; rerun locally for your hardware.
