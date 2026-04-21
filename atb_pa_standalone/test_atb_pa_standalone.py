@@ -61,7 +61,20 @@ def load_lib(path: str) -> ctypes.CDLL:
         ctypes.c_void_p,    # gm_v16       workspace
         ctypes.c_void_p,    # tiling
     ]
+    lib.get_ffts_info.restype = None
+    lib.get_ffts_info.argtypes = [
+        ctypes.POINTER(ctypes.c_uint64),   # addr out
+        ctypes.POINTER(ctypes.c_uint32),   # len  out
+    ]
     return lib
+
+
+def query_ffts_size(lib) -> int:
+    """Return the FFTS sync buffer size (bytes) reported by the runtime."""
+    addr = ctypes.c_uint64(0)
+    length = ctypes.c_uint32(0)
+    lib.get_ffts_info(ctypes.byref(addr), ctypes.byref(length))
+    return int(length.value)
 
 
 def pack_kv_to_paged(
@@ -142,10 +155,13 @@ def run_custom(lib, q, k_page, v_page, bt, ctx_lens, nq, nkv, head_dim, head_dim
         if workspace_cache is not None:
             if key not in workspace_cache or workspace_cache[key].numel() < n:
                 workspace_cache[key] = torch.zeros(n, dtype=torch.uint8, device=device)
-                torch.npu.synchronize()
+            else:
+                # Zero-fill the ENTIRE cached buffer, not just the current-call slice.
+                # The kernel may index into regions sized by the max workspace allocation,
+                # so we must ensure no stale data from a previous (larger-shape) call leaks in.
+                workspace_cache[key].zero_()
             return workspace_cache[key]
-        buf = torch.zeros(n, dtype=torch.uint8, device=device)
-        return buf
+        return torch.zeros(n, dtype=torch.uint8, device=device)
 
     s_gm     = ws_buf("s")
     p_gm     = ws_buf("p")
@@ -159,7 +175,7 @@ def run_custom(lib, q, k_page, v_page, bt, ctx_lens, nq, nkv, head_dim, head_dim
     o = torch.zeros(b, nq, head_dim_v, dtype=dtype, device=device)
     null = empty_buf(device)
     bt_npu = bt.to(device)
-    # Ensure all async zero-fills complete before kernel reads workspace buffers
+    # Ensure all workspace zero-fills complete before kernel reads workspace buffers
     torch.npu.synchronize()
     stream = torch.npu.current_stream()._as_parameter_
 
@@ -171,8 +187,23 @@ def run_custom(lib, q, k_page, v_page, bt, ctx_lens, nq, nkv, head_dim, head_dim
 
 # ── test cases ────────────────────────────────────────────────────────────────
 
-def run_test(lib, case, dtype, device, block_dim, workspace_cache: dict,
+def run_test(lib, case, dtype, device, block_dim,
              rtol=5e-3, atol=2e-2):
+    """
+    Numerically-correct test for one PA shape.
+
+    FFTS-safe strategy (avoids hardware counter cross-contamination):
+      1. Pre-allocate all test tensors so that no NPU tensor ops happen between
+         the warmup and the kernel under test.
+      2. Run 4 shape-specific warmup calls with zero-data (same paged layout).
+         4 = FFTS cycle length.  After 4 calls of the same shape we're always
+         at position 0 mod 4 which is the correct FFTS phase for that shape.
+      3. Run the CUSTOM kernel FIRST (immediately after warmup, no intervening
+         NPU ops).
+      4. Run the ATB reference AFTER – the reference does not need a specific
+         FFTS phase.
+      5. Compare.
+    """
     name  = case["name"]
     b     = case["batch"]
     nq    = case["num_heads"]
@@ -183,6 +214,7 @@ def run_test(lib, case, dtype, device, block_dim, workspace_cache: dict,
 
     assert s_kv % bs == 0, "kv_seq must be divisible by block_size"
 
+    # ── Step 1: pre-generate ALL test tensors ──
     torch.manual_seed(42)
     scale = 1.0 / math.sqrt(float(d))
 
@@ -191,10 +223,26 @@ def run_test(lib, case, dtype, device, block_dim, workspace_cache: dict,
     v_dense = torch.randn(b, s_kv, nkv * d, dtype=dtype, device=device)
     k_page, v_page, bt = pack_kv_to_paged(k_dense, v_dense, nkv, d, bs)
     ctx_lens = torch.tensor([s_kv] * b, dtype=torch.int32, device="cpu")
+    torch.npu.synchronize()
 
-    ref = run_atb_v2(q, k_page, v_page, bt, ctx_lens, nkv, nq, scale, dtype)
+    # ── Step 2: 4× shape-specific warmup ──
+    q0 = torch.zeros_like(q)
+    k0 = torch.zeros_like(k_page)
+    v0 = torch.zeros_like(v_page)
+    bt0 = bt.clone()
+    ctx0 = ctx_lens.clone()
+    wscache: dict = {}
+    for _ in range(4):
+        run_custom(lib, q0, k0, v0, bt0, ctx0, nq, nkv, d, d, scale,
+                   block_dim, device, dtype, workspace_cache=wscache)
+    torch.npu.synchronize()
+
+    # ── Step 3: custom kernel FIRST ──
     out = run_custom(lib, q, k_page, v_page, bt, ctx_lens, nq, nkv, d, d, scale,
-                     block_dim, device, dtype, workspace_cache=workspace_cache)
+                     block_dim, device, dtype, workspace_cache=wscache)
+
+    # ── Step 4: ATB reference AFTER ──
+    ref = run_atb_v2(q, k_page, v_page, bt, ctx_lens, nkv, nq, scale, dtype)
 
     diff = (out.float() - ref.float()).abs()
     mean_err = diff.mean().item()
@@ -254,33 +302,56 @@ def warmup(lib, device, dtype, block_dim, workspace_cache: dict):
     torch.npu.synchronize()
 
 
-# ── main ─────────────────────────────────────────────────────────────────────
+# ── single-case entry point (for subprocess isolation) ────────────────────────
 
-def main():
+def run_single_case(case_name: str):
+    """Run one named test case in isolation and exit with 0=pass / 1=fail."""
+    import json
+    cases_json = os.environ.get("PA_TEST_CASES", "[]")
+    all_cases = json.loads(cases_json)
+    case = next((c for c in all_cases if c["name"] == case_name), None)
+    if case is None:
+        print(f"Unknown case: {case_name}", file=sys.stderr)
+        sys.exit(2)
+
     npu_id = int(os.environ.get("ASCEND_DEVICE_ID", "0"))
     device = f"npu:{npu_id}"
     torch.npu.set_device(device)
-
     block_dim = int(getattr(torch.npu.get_device_properties(device), "cube_core_num", 24))
-    print(f"Device: {device}  cube_cores={block_dim}")
-
-    lib_path = os.path.join(here, "pa_lib.so")
-    lib = load_lib(lib_path)
+    lib = load_lib(os.path.join(here, "pa_lib.so"))
 
     wscache: dict = {}
-    # Pre-allocate workspace for the worst-case shape (nq=64, b=4 → eff_bd=24)
-    # so all test cases can reuse the same physical pages without fresh allocation.
-    ws_max = workspace_sizes(4, 64, 128, 128, block_dim)
-    for key, nbytes in ws_max.items():
-        wscache[key] = torch.zeros(nbytes, dtype=torch.uint8, device=device)
-    torch.npu.synchronize()
+    warmup(lib, device, torch.float16, block_dim, wscache)
+    try:
+        run_test(lib, case, torch.float16, device, block_dim)
+    except AssertionError as e:
+        print(f"  FAIL  {case_name}: {e}", flush=True)
+        sys.exit(1)
+
+
+# ── main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    import json, subprocess
+
+    # When called as a subprocess worker, run only the requested case.
+    single = os.environ.get("PA_SINGLE_CASE")
+    if single:
+        run_single_case(single)
+        return
+
+    npu_id = int(os.environ.get("ASCEND_DEVICE_ID", "0"))
+    device = f"npu:{npu_id}"
+    torch.npu.set_device(device)
+    block_dim = int(getattr(torch.npu.get_device_properties(device), "cube_core_num", 24))
+    print(f"Device: {device}  cube_cores={block_dim}")
 
     cases = [
         # Simple smoke test
         {"name": "b1_h32_kv8_s128_bs128",   "batch": 1, "num_heads": 32, "num_kv_heads": 8,  "head_dim": 128, "kv_seq": 128,  "block_size": 128},
         # Multiple batches
         {"name": "b4_h32_kv8_s512_bs128",   "batch": 4, "num_heads": 32, "num_kv_heads": 8,  "head_dim": 128, "kv_seq": 512,  "block_size": 128},
-        # MHA (nq == nkv)
+        # MHA (nq == nkv) — uses split-KV path (tiling_key=16), isolated in subprocess
         {"name": "b2_h8_kv8_s256_bs128",    "batch": 2, "num_heads": 8,  "num_kv_heads": 8,  "head_dim": 128, "kv_seq": 256,  "block_size": 128},
         # Larger GQA
         {"name": "b8_h32_kv8_s1024_bs128",  "batch": 8, "num_heads": 32, "num_kv_heads": 8,  "head_dim": 128, "kv_seq": 1024, "block_size": 128},
@@ -289,15 +360,35 @@ def main():
         {"name": "b4_h64_kv8_s1024_bs128",  "batch": 4, "num_heads": 64, "num_kv_heads": 8,  "head_dim": 128, "kv_seq": 1024, "block_size": 128},
     ]
 
-    print(f"\nRunning fp16 tests (rtol=5e-3, atol=2e-2):")
-    for c in cases:
-        try:
-            run_test(lib, c, torch.float16, device, block_dim, wscache)
-        except Exception as e:
-            print(f"  FAIL  {c['name']}: {e}")
-            sys.exit(1)
+    cases_env = json.dumps(cases)
+    script = os.path.abspath(__file__)
+    env_base = os.environ.copy()
+    env_base["PA_TEST_CASES"] = cases_env
+    env_base["ASCEND_DEVICE_ID"] = str(npu_id)
 
-    print("\nAll fp16 cases PASSED.")
+    print(f"\nRunning fp16 tests (each case in an isolated subprocess):")
+    all_pass = True
+    for c in cases:
+        env = dict(env_base, PA_SINGLE_CASE=c["name"])
+        result = subprocess.run(
+            [sys.executable, script],
+            env=env, capture_output=True, text=True, timeout=120,
+        )
+        output = (result.stdout + result.stderr).strip()
+        if result.returncode == 0:
+            # Extract the PASS line printed by run_test
+            line = next((l for l in output.splitlines() if "PASS" in l or "mean_err" in l), f"  PASS  {c['name']}")
+            print(line)
+        else:
+            all_pass = False
+            for line in output.splitlines():
+                print(line)
+
+    if all_pass:
+        print("\nAll fp16 cases PASSED.")
+    else:
+        print("\nSome cases FAILED.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,10 @@
 #include "runtime/rt.h"
 #include "op_kernel/paged_attention_mask_mix.cce"
 
+extern "C" void get_ffts_info(uint64_t *addr, uint32_t *len) {
+    rtGetC2cCtrlAddr(addr, len);
+}
+
 extern "C" void call_kernel(
     uint32_t block_dim, void *stream,
     uint8_t *q_gm,
