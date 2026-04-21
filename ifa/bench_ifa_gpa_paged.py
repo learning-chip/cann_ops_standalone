@@ -213,12 +213,28 @@ def run_one_paged(case: PagedCase, dtype: torch.dtype, warmup_iters: int, benchm
     )
 
 
+def _resolve_npu_device_id(cli_device: int | None) -> int:
+    if cli_device is not None:
+        return cli_device
+    env = os.environ.get("ASCEND_DEVICE_ID", "").strip()
+    if env.isdigit():
+        return int(env)
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="IFA GQA paged-KV benchmark (block_table).")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--skip-verify", action="store_true", help="Skip dense vs paged correctness check.")
+    parser.add_argument(
+        "--device",
+        type=int,
+        default=None,
+        metavar="N",
+        help="NPU device id (default: ASCEND_DEVICE_ID env or 0).",
+    )
     args = parser.parse_args()
 
     if torch_npu is None or not torch.npu.is_available():
@@ -226,10 +242,11 @@ def main() -> None:
         sys.exit(1)
 
     dtype = torch.bfloat16 if args.bf16 else torch.float16
-    torch.npu.set_device("npu:0")
+    npu_id = _resolve_npu_device_id(args.device)
+    torch.npu.set_device(npu_id)
 
     print("npu_incre_flash_attention **paged KV** (block_table) — timer: benchmark_with_events")
-    print(f"dtype={dtype} warmup={args.warmup} benchmark_iters={args.iters}")
+    print(f"npu:{npu_id} dtype={dtype} warmup={args.warmup} benchmark_iters={args.iters}")
 
     if not args.skip_verify:
         print("Correctness: dense BSH vs paged KV (small + large batch)...")
