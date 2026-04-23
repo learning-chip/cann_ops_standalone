@@ -1,13 +1,3 @@
-/*
-* Copyright (c) 2024 Huawei Technologies Co., Ltd.
-* This program is free software, you can redistribute it and/or modify it under the terms and conditions of
-* CANN Open Software License Agreement Version 2.0 (the "License").
-* Please refer to the License for details. You may not use this file except in compliance with the License.
-* THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
-* INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
-* See LICENSE in the root of the software repository for the full text of the License.
-*/
-
 #ifndef PAGED_HATTENTION_H
 #define PAGED_HATTENTION_H
 
@@ -93,7 +83,7 @@ using PagedAttentionInfo = struct PagedAttentionTilingParams {
     int32_t *qSeqLen{nullptr};
     int32_t qHeadOriginal = 0;
     int32_t compressHead = 0;
-    int32_t tBlockAlign = 16; // 算子L1内对齐，fp16 16  int8 32
+    int32_t tBlockAlign = 16; // L1 tile alignment: 16 for fp16, 32 for int8
     int32_t dataShapeType = 0;
 };
 

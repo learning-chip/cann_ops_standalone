@@ -1,13 +1,3 @@
-/*
-* Copyright (c) 2024 Huawei Technologies Co., Ltd.
-* This program is free software, you can redistribute it and/or modify it under the terms and conditions of
-* CANN Open Software License Agreement Version 2.0 (the "License").
-* Please refer to the License for details. You may not use this file except in compliance with the License.
-* THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
-* INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
-* See LICENSE in the root of the software repository for the full text of the License.
-*/
-
 #include <limits>
 #include <type_traits>
 #include "kernel_operator.h"
@@ -328,9 +318,9 @@ constexpr uint32_t UB_ALIGN_BYTE = 32;
 constexpr int32_t FLOAT_VECTOR_SIZE = 64;
 constexpr int64_t UB_UINT8_BLOCK_SIZE_MLA = 16384;      // 96 * 128 * 2B // prefill/decoder diff
 constexpr int64_t UB_UINT8_BLOCK_SIZE_NORM = 24576;
-constexpr int64_t UB_UINT8_LINE_SIZE = 512;         // 64 * 4B，申请两倍空间防踩踏。
+constexpr int64_t UB_UINT8_LINE_SIZE = 512;         // 64 * 4 B; 2x headroom to avoid UB overlap.
 constexpr int64_t UB_HALF_LINE_SIZE = 256;          // UB_FLOAT_LINE_SIZE * 2
-constexpr int64_t UB_FLOAT_LINE_SIZE = 128;         // 64，申请两倍空间防踩踏。
+constexpr int64_t UB_FLOAT_LINE_SIZE = 128;         // 64 floats; 2x headroom to avoid UB overlap.
 
 constexpr int64_t PRE_UB_UINT8_BLOCK_SIZE = 16384;  // 64 * 128 * 2B
 constexpr int32_t VECTOR_SIZE = 128;                // prefill
@@ -1222,7 +1212,7 @@ private:
                             real_n_loop, sub_n_loop, (n_idx + 1)
                         );
                     wait_flag(PIPE_MTE2, PIPE_MTE1, l1_pingpong_flag);
-                    // s_gm ping pong 不共用
+                    // s_gm ping-pong halves are separate (stage-2 uses the second half).
                     ProcessQK(
                         s_gm + ((uint64_t)block_idx * TMP_SIZE_DECODER +
                             split_idx * head_split_num_move * group_num_move * qk_round_n_2 +
@@ -1643,12 +1633,12 @@ private:
         set_atomic_none();
         set_mask_norm();
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
-        const uint32_t ll_ubuf_stage2_offset = 0;  // 1 块，存放 存放local L fp32
-        const uint32_t lm_ubuf_stage2_offset = 1 * STAGE2_UB_UINT8_BLOCK_SIZE;  //  1 块，存放 l max, fp32
-        const uint32_t tl_ubuf_stage2_offset = 1 * STAGE2_UB_UINT8_BLOCK_SIZE + 1 * UB_UINT8_LINE_SIZE; // 1 块，存放中间结果tmp l, fp32
-        const uint32_t rs_ubuf_stage2_offset = 2 * STAGE2_UB_UINT8_BLOCK_SIZE + 1 * UB_UINT8_LINE_SIZE; // 存放中间结果row sum, fp32
-        const uint32_t ts_ubuf_stage2_offset = 2 * STAGE2_UB_UINT8_BLOCK_SIZE + 2 * UB_UINT8_LINE_SIZE; // 存放中间结果row sum, fp32
-        const uint32_t gl_ubuf_stage2_offset = 2 * STAGE2_UB_UINT8_BLOCK_SIZE + 3 * UB_UINT8_LINE_SIZE; // 存放gloal scale, fp32
+        const uint32_t ll_ubuf_stage2_offset = 0;  // Tile: per-split log-sum L in fp32
+        const uint32_t lm_ubuf_stage2_offset = 1 * STAGE2_UB_UINT8_BLOCK_SIZE;  // Tile: row-wise l max in fp32
+        const uint32_t tl_ubuf_stage2_offset = 1 * STAGE2_UB_UINT8_BLOCK_SIZE + 1 * UB_UINT8_LINE_SIZE; // Tile: tmp shifted L before exp, fp32
+        const uint32_t rs_ubuf_stage2_offset = 2 * STAGE2_UB_UINT8_BLOCK_SIZE + 1 * UB_UINT8_LINE_SIZE; // Tile: row sum after exp, fp32
+        const uint32_t ts_ubuf_stage2_offset = 2 * STAGE2_UB_UINT8_BLOCK_SIZE + 2 * UB_UINT8_LINE_SIZE; // Tile: log(row sum) + l_max scratch, fp32
+        const uint32_t gl_ubuf_stage2_offset = 2 * STAGE2_UB_UINT8_BLOCK_SIZE + 3 * UB_UINT8_LINE_SIZE; // Tile: global combine scale in fp32
         const uint32_t lo_ubuf_stage2_offset = 4 * STAGE2_UB_UINT8_BLOCK_SIZE + 3 * UB_UINT8_LINE_SIZE;
         const uint32_t to_ubuf_stage2_offset = 8 * STAGE2_UB_UINT8_BLOCK_SIZE + 3 * UB_UINT8_LINE_SIZE;
         const uint32_t go_ubuf_stage2_offset = 12 * STAGE2_UB_UINT8_BLOCK_SIZE + 3 * UB_UINT8_LINE_SIZE;
@@ -1706,7 +1696,7 @@ private:
             uint32_t kv_seqlen_align = (kv_seqlen + block_size - 1) / block_size * block_size;
             uint32_t m_split = (kv_seqlen_align + kv_split_per_core - 1) /  kv_split_per_core;
             uint32_t cur_core = process % core_per_batch;
-            uint32_t cur_head_num = split_block; // 每次计算的head数量
+            uint32_t cur_head_num = split_block; // Number of query heads processed in this split
             if (cur_core == (core_per_batch - 1)){
                 cur_head_num = q_heads - cur_core * split_block;
             }
@@ -2348,7 +2338,7 @@ private:
             0                          // dstGap
         );
         pipe_barrier(PIPE_V);
-        // *** hm_block = expand_to_block(hm), 存放于 tv
+        // *** hm_block = expand_to_block(hm), materialized in tv
         if constexpr (SplitKV) {
             if (n_idx == 0) {
                 if (gl_flag_scalar == 1) {
@@ -2433,7 +2423,7 @@ private:
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
         set_vector_mask((uint64_t)-1, (uint64_t)-1);
-        // *** 更新 L 和 O
+        // *** Update L and O
         if (n_idx != 0) {
             // *** dm = exp(dm)
             vexp((dm32_ubuf_tensor), (dm32_ubuf_tensor),
@@ -2466,7 +2456,7 @@ private:
                 8
             );
             pipe_barrier(PIPE_V);
-            // *** dm_block = expand_to_block(dm), 存放于 tv
+            // *** dm_block = expand_to_block(dm), materialized in tv
             vbrcb((__ubuf__ uint32_t *)tv32_ubuf_tensor, (__ubuf__ uint32_t *)dm32_ubuf_tensor,
             1,
             8,
@@ -2546,7 +2536,7 @@ private:
         set_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
 
         if (n_idx == n_loop - 1) {
-            // *** gl_block = expand_to_block(gl), 存放于 tv
+            // *** gl_block = expand_to_block(gl), materialized in tv
             vbrcb((__ubuf__ uint32_t *)tv32_ubuf_tensor, (__ubuf__ uint32_t *)gl32_ubuf_tensor,
             1,
             8,
@@ -2581,7 +2571,7 @@ private:
             pipe_barrier(PIPE_V);
 
             if constexpr (SplitKV) {
-                // log（l）
+                // log(l)
                     vln((tv32_ubuf_tensor), (tv32_ubuf_tensor),
                 sub_m,
                 1,
@@ -2901,8 +2891,8 @@ private:
     uint32_t embed_split_loop_v_tail{1};
 
 
-    uint32_t modCoef{0xffffffff}; // 对batch_idx取模的参数，适用于多头自适应压缩场景
-    uint32_t divCoef{1}; // 对batch_idx做除法的参数，适用于多头自适应压缩场景
+    uint32_t modCoef{0xffffffff}; // batch_idx % modCoef (multi-head adaptive compression tiling)
+    uint32_t divCoef{1}; // batch_idx / divCoef (multi-head adaptive compression tiling)
     uint32_t q_head_original{0};
     uint32_t compressHead{0};
 
