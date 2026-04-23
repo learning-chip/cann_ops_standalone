@@ -152,15 +152,6 @@ __aicore__ inline void pa_l1_to_l0_b_vector(__cb__ DataType *l0, __cbuf__ DataTy
     }
 }
 
-__aicore__ inline void pa_l0c_to_gm_nd_fp32(__gm__ float *gm, __cc__ float *cc, uint32_t mTileActual,
-    uint32_t nTileActual, uint32_t srcStride, uint32_t dstStride, uint8_t unitFlag = 0)
-{
-    set_nd_para((uint64_t)1);
-    pipe_barrier(PIPE_FIX);
-    copy_matrix_cc_to_gm(gm, cc, 0, nTileActual, mTileActual, dstStride, srcStride, unitFlag, QuantMode_t::NoQuant, 0,
-        false, true);
-}
-
 struct LoadData2dTransposeParams {
     uint16_t startIndex{0};
     uint16_t repeatTimes{0};
@@ -866,14 +857,12 @@ private:
             wait_flag(PIPE_M, PIPE_FIX, l0_pingpong_flag);
             // copy S to gm
             uint64_t s_gm_offset = headdim_idx * group_num_move * qk_round_n;
-            pa_l0c_to_gm_nd_fp32(
+            pa_pto::tstore_l0c_fp32_nd(
                 s_gm_tensor + (s_gm_offset),
                 mm1_l0c_buf_tensor + (l0c_offset),
-                m,           // MSize
-                qk_round_n,  // NSize
-                RoundUp<16>(m), // srcStride
-                qk_round_n  // dstStride_dst_D
-            );
+                m,
+                qk_round_n,
+                qk_round_n);
             set_flag(PIPE_FIX, PIPE_M, l0_pingpong_flag);
             l0_pingpong_flag = 1 - l0_pingpong_flag;
             l0_offset = l0_pingpong_flag * L0AB_UINT8_BUF_SIZE / sizeof(IN_DTYPE);
@@ -1067,14 +1056,12 @@ private:
             wait_flag(PIPE_M, PIPE_FIX, l0_pingpong_flag);
             // copy O to gm
             uint64_t o_temp_gm_offset = headdim_idx * group_num_move * RoundUp<16>(__k);
-            pa_l0c_to_gm_nd_fp32(
+            pa_pto::tstore_l0c_fp32_nd(
                 o_tmp_gm_tensor + (o_temp_gm_offset),
                 mm2_l0c_buf_tensor + (l0c_offset),
-                m,        // MSize
-                RoundUp<16>(__k),  // NSize
-                RoundUp<16>(m),       // srcStride
-                RoundUp<16>(__k)  // dstStride_dst_D
-            );
+                m,
+                RoundUp<16>(__k),
+                RoundUp<16>(__k));
 
             set_flag(PIPE_FIX, PIPE_M, l0_pingpong_flag);
             ChangeL0PingPongFlag();
