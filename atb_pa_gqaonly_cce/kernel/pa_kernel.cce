@@ -11,11 +11,12 @@
 #include <limits>
 #include <type_traits>
 #include "kernel_operator.h"
-#include "mixkernels/pagedattention/tiling/paged_attention_tiling_dependency.h"
+#include "tiling/pa_tiling_struct.h"
 
 #ifndef __force_inline__
 #define __force_inline__ inline __attribute__((always_inline))
 #endif
+
 
 template <uint32_t ALIGN, typename T = uint32_t>
 inline __aicore__ T RoundUp(const T val)

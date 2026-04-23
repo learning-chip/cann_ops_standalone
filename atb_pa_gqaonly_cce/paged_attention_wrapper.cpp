@@ -1,6 +1,6 @@
 #include "kernel_operator.h"
 #include "runtime/rt.h"
-#include "op_kernel/paged_attention_mask_mix.cce"
+#include "kernel/pa_entry.cce"
 
 extern "C" void get_ffts_info(uint64_t *addr, uint32_t *len) {
     rtGetC2cCtrlAddr(addr, len);
