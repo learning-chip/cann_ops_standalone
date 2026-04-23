@@ -8,8 +8,167 @@
 * See LICENSE in the root of the software repository for the full text of the License.
 */
 
-#include "pa_kernel_inline.h"
+#include <limits>
+#include <type_traits>
+#include "kernel_operator.h"
 #include "mixkernels/pagedattention/tiling/paged_attention_tiling_dependency.h"
+
+#ifndef __force_inline__
+#define __force_inline__ inline __attribute__((always_inline))
+#endif
+
+template <uint32_t ALIGN, typename T = uint32_t>
+inline __aicore__ T RoundUp(const T val)
+{
+    static_assert(ALIGN != 0, "align must not be zero");
+    static_assert(std::is_arithmetic<T>::value, "T must be an arithmetic type");
+    T align = ALIGN;
+    if (val + align - 1 < val) {
+        return val;
+    }
+    return (val + align - 1) / align * align;
+}
+
+template <typename T>
+inline __aicore__ T RoundUp(const T val, const T align)
+{
+    static_assert(std::is_arithmetic<T>::value, "T must be an arithmetic type");
+    if (align == 0 || val + align - 1 < val) {
+        return val;
+    }
+    return (val + align - 1) / align * align;
+}
+
+template <uint32_t DIVISOR, typename T = uint32_t>
+inline __aicore__ T CeilDiv(const T dividend)
+{
+    static_assert(DIVISOR != 0, "divisor must not be zero");
+    static_assert(std::is_arithmetic<T>::value, "T must be an arithmetic type");
+    T divisor = DIVISOR;
+    if (dividend + divisor - 1 < dividend) {
+        return dividend;
+    }
+    return (dividend + divisor - 1) / divisor;
+}
+
+template <typename T>
+constexpr T T_MAX = std::numeric_limits<T>::max();
+
+template <typename T>
+inline __aicore__ T CeilDiv(const T dividend, const T divisor)
+{
+    static_assert(std::is_arithmetic<T>::value, "T must be an arithmetic type");
+    if (divisor == 0 || dividend + divisor - 1 < dividend) {
+        return T_MAX<T>;
+    }
+    return (dividend + divisor - 1) / divisor;
+}
+
+constexpr Order_t ORDER_ONLY_VALUE = ONLY_VALUE;
+
+template <typename DTypeIn, typename DTypeOut>
+__aicore__ inline void conv_v(__ubuf__ DTypeOut *dst, __ubuf__ DTypeIn *src, uint8_t repeat, uint16_t dstBlockStride,
+    uint16_t srcBlockStride, uint16_t dstRepeatStride, uint16_t srcRepeatStride)
+{
+    if constexpr (std::is_same<DTypeIn, float>::value && std::is_same<DTypeOut, __bf16>::value) {
+        vconv_f322bf16r((__ubuf__ __bf16 *)dst, (__ubuf__ float *)src, repeat, dstBlockStride, srcBlockStride,
+            dstRepeatStride, srcRepeatStride);
+    } else if constexpr (std::is_same<DTypeIn, float>::value && std::is_same<DTypeOut, half>::value) {
+        vconv_f322f16((__ubuf__ half *)dst, (__ubuf__ float *)src, repeat, dstBlockStride, srcBlockStride,
+            dstRepeatStride, srcRepeatStride);
+    } else if constexpr (std::is_same<DTypeIn, half>::value && std::is_same<DTypeOut, float>::value) {
+        vconv_f162f32((__ubuf__ float *)dst, (__ubuf__ half *)src, repeat, dstBlockStride, srcBlockStride,
+            dstRepeatStride, srcRepeatStride);
+    } else if constexpr (std::is_same<DTypeIn, __bf16>::value && std::is_same<DTypeOut, float>::value) {
+        vconv_bf162f32((__ubuf__ float *)dst, (__ubuf__ __bf16 *)src, repeat, dstBlockStride, srcBlockStride,
+            dstRepeatStride, srcRepeatStride);
+    } else {
+        static_assert(!std::is_same<DTypeIn, DTypeIn>::value, "Unsupported conv_v dtype combination.");
+    }
+}
+
+template <pipe_t pipe, uint8_t mode>
+__aicore__ inline void FftsCrossCoreSync(uint16_t flagId)
+{
+    uint64_t config = 1ULL | (static_cast<uint64_t>(mode) << 4) | (static_cast<uint64_t>(flagId) << 8);
+    ffts_cross_core_sync(pipe, config);
+}
+
+constexpr uint32_t PA_L1L0_BLOCK_BYTES = 32;
+constexpr uint32_t PA_GM_ND2NZ_STRIDE_LIMIT = 65536;
+
+template <typename DataType>
+__aicore__ inline void pa_gm_to_l1_nd_nd(__cbuf__ DataType *l1, __gm__ DataType *gm, uint32_t nTileActual,
+    uint32_t nTileCeil, uint32_t nVal, uint32_t dTileActual, uint32_t dTileCeil, uint32_t dVal)
+{
+    (void)nVal;
+    (void)dTileCeil;
+    static constexpr uint32_t BLOCK_SIZE = PA_L1L0_BLOCK_BYTES / sizeof(DataType);
+    copy_gm_to_cbuf(l1, gm, 0, 1, CeilDiv<BLOCK_SIZE>(nTileActual * dTileActual), 0, 0, PAD_NONE);
+}
+
+template <typename DataType>
+__aicore__ inline void pa_gm_to_l1_nd_nz(__cbuf__ DataType *l1, __gm__ DataType *gm, uint32_t nTileActual,
+    uint32_t nTileCeil, uint32_t nVal, uint32_t dTileActual, uint32_t dTileCeil, uint32_t dVal)
+{
+    (void)nVal;
+    (void)dTileCeil;
+    static constexpr uint32_t BLOCK_SIZE = PA_L1L0_BLOCK_BYTES / sizeof(DataType);
+    if (dVal < PA_GM_ND2NZ_STRIDE_LIMIT) {
+        if constexpr (sizeof(DataType) == 4) {
+            copy_gm_to_cbuf_multi_nd2nz_b32s(l1, gm, 0, 1, nTileActual, dTileActual, 0, dVal, nTileCeil, 1, 0);
+        } else {
+            copy_gm_to_cbuf_multi_nd2nz_b16(l1, gm, 0, 1, nTileActual, dTileActual, 0, dVal, nTileCeil, 1, 0);
+        }
+    } else {
+        for (uint32_t i = 0; i < nTileActual; i++) {
+            if constexpr (sizeof(DataType) == 4) {
+                copy_gm_to_cbuf_multi_nd2nz_b32s(l1 + i * BLOCK_SIZE, gm + i * dVal, 0, 1, 1, dTileActual, 0, 0,
+                    nTileCeil, 0, 0);
+            } else {
+                copy_gm_to_cbuf_multi_nd2nz_b16(l1 + i * BLOCK_SIZE, gm + i * dVal, 0, 1, 1, dTileActual, 0, 0,
+                    nTileCeil, 0, 0);
+            }
+        }
+    }
+}
+
+template <typename DataType, bool IsTranspose>
+__aicore__ inline void pa_l1_to_l0_a_vector(__ca__ DataType *l0, __cbuf__ DataType *l1, uint32_t mTileCeil,
+    uint32_t kPartCeil, uint32_t mSrcStride, uint32_t kSrcStride, uint32_t mDstStride, uint32_t kDstStride)
+{
+    (void)mTileCeil;
+    (void)mSrcStride;
+    (void)mDstStride;
+    if constexpr (IsTranspose) {
+        load_cbuf_to_ca(l0, l1, 0, kPartCeil, kSrcStride, kDstStride, 0, 1, (addr_cal_mode_t)0);
+    } else {
+        load_cbuf_to_ca(l0, l1, 0, kPartCeil, kSrcStride, kDstStride, 0, 0, (addr_cal_mode_t)0);
+    }
+}
+
+template <typename DataType, bool IsTranspose>
+__aicore__ inline void pa_l1_to_l0_b_vector(__cb__ DataType *l0, __cbuf__ DataType *l1, uint32_t nTileCeil,
+    uint32_t kPartCeil, uint32_t nSrcStride, uint32_t kSrcStride, uint32_t nDstStride, uint32_t kDstStride)
+{
+    (void)nTileCeil;
+    (void)nSrcStride;
+    (void)nDstStride;
+    if constexpr (IsTranspose) {
+        load_cbuf_to_cb(l0, l1, 0, kPartCeil, kSrcStride, kDstStride, 0, 1, (addr_cal_mode_t)0);
+    } else {
+        load_cbuf_to_cb(l0, l1, 0, kPartCeil, kSrcStride, kDstStride, 0, 0, (addr_cal_mode_t)0);
+    }
+}
+
+__aicore__ inline void pa_l0c_to_gm_nd_fp32(__gm__ float *gm, __cc__ float *cc, uint32_t mTileActual,
+    uint32_t nTileActual, uint32_t srcStride, uint32_t dstStride, uint8_t unitFlag = 0)
+{
+    set_nd_para((uint64_t)1);
+    pipe_barrier(PIPE_FIX);
+    copy_matrix_cc_to_gm(gm, cc, 0, nTileActual, mTileActual, dstStride, srcStride, unitFlag, QuantMode_t::NoQuant, 0,
+        false, true);
+}
 
 struct LoadData2dTransposeParams {
     uint16_t startIndex{0};
@@ -699,15 +858,17 @@ private:
             set_flag(PIPE_MTE1, PIPE_M, l0_pingpong_flag);
             wait_flag(PIPE_MTE1, PIPE_M, l0_pingpong_flag);
             wait_flag(PIPE_FIX, PIPE_M, l0_pingpong_flag);
-            pa_mmad<IN_DTYPE, IN_DTYPE, mm1OutputType>(
+            mad(
                 mm1_l0c_buf_tensor + (l0c_offset),
                 l0a_buf_tensor + (l0_offset),
                 l0b_buf_tensor + (mad_l0b_offset),
-                m,     // m
-                qk_n,  // n
-                __k,   // k
-                1      // cmatrixInitVal
-            );
+                m,
+                __k,
+                qk_n,
+                0,
+                false,
+                false,
+                1);
             if (is_l0b_pingpong_off) {
                 set_flag(PIPE_M, PIPE_MTE1, l0b_pingpong_flag + 2);
             } else {
@@ -905,15 +1066,17 @@ private:
             set_flag(PIPE_MTE1, PIPE_M, l0_pingpong_flag);
             wait_flag(PIPE_MTE1, PIPE_M, l0_pingpong_flag);
             wait_flag(PIPE_FIX, PIPE_M, l0_pingpong_flag);
-            pa_mmad<IN_DTYPE, IN_DTYPE, mm2OutputType>(
+            mad(
                 mm2_l0c_buf_tensor + (l0c_offset),
                 l0a_buf_tensor + (l0_offset),
                 l0b_buf_tensor + (mad_l0b_offset),
-                m,     // m
-                __k,   // n
-                qk_n,  // k
-                1      // cmatrixInitVal
-            );
+                m,
+                qk_n,
+                __k,
+                0,
+                false,
+                false,
+                1);
 
             if (is_l0b_pingpong_off) {
                 set_flag(PIPE_M, PIPE_MTE1, l0b_pingpong_flag + 2);
@@ -1446,7 +1609,7 @@ private:
     {
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID2);
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID2);
-        pa_ub_to_gm_align<float>(
+        copy_ubuf_to_gm_align_b32(
             l_gm + ((int64_t)l_offset),
             tv32_ubuf_tensor,
             0,               // sid
@@ -1462,7 +1625,7 @@ private:
             gl_flag_scalar = 1;
         }
         uint32_t src_gap = ((__k % 16 <= 8) && (__k % 16 > 0))? 1 : 0;
-        pa_ub_to_gm_align<float>(
+        copy_ubuf_to_gm_align_b32(
             o_core_tmp_gm + ((int64_t)o_offset),
             go32_ubuf_tensor,
             0,        // sid
@@ -1551,7 +1714,7 @@ private:
             uint64_t addr_o_offset = addr_o_fd_scalar * kv_split_core_num;
             uint32_t l_remain = m_split % FLOAT_BLOCK_SIZE;
             wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-            pa_gm_to_ub_align<float>(
+            copy_gm_to_ubuf_align_b32(
                 ll_ubuf_stage2_tensor,
                 l_gm + (addr_l_offset + start_head * kv_split_core_num),
                 0,                            // sid
@@ -1567,7 +1730,7 @@ private:
             wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
             __set_mask(m_split);
-            vcmax(Ub<float>(lm_ubuf_stage2_tensor), Ub<float>(ll_ubuf_stage2_tensor),
+            vcmax((lm_ubuf_stage2_tensor), (ll_ubuf_stage2_tensor),
                 (m_split + FLOAT_VECTOR_SIZE - 1) / FLOAT_VECTOR_SIZE,
                 1,
                 1,
@@ -1582,7 +1745,7 @@ private:
             float lse_max = -(float)(*lm_ubuf_stage2_tensor);
             set_flag(PIPE_S, PIPE_V, EVENT_ID2);
             wait_flag(PIPE_S, PIPE_V, EVENT_ID2);
-            vadds(Ub<float>(tl_ubuf_stage2_tensor), Ub<float>(ll_ubuf_stage2_tensor), lse_max,
+            vadds((tl_ubuf_stage2_tensor), (ll_ubuf_stage2_tensor), lse_max,
                 (m_split + FLOAT_VECTOR_SIZE - 1) / FLOAT_VECTOR_SIZE,
                 1,
                 1,
@@ -1592,7 +1755,7 @@ private:
             pipe_barrier(PIPE_V);
 
             // expf
-            vexp(Ub<float>(tl_ubuf_stage2_tensor), Ub<float>(tl_ubuf_stage2_tensor),
+            vexp((tl_ubuf_stage2_tensor), (tl_ubuf_stage2_tensor),
                 (m_split + FLOAT_VECTOR_SIZE - 1) / FLOAT_VECTOR_SIZE,
                 1,
                 1,
@@ -1602,7 +1765,7 @@ private:
             pipe_barrier(PIPE_V);
 
             // rowsum lse_sum
-            vcadd(Ub<float>(rs_ubuf_stage2_tensor), Ub<float>(tl_ubuf_stage2_tensor),
+            vcadd((rs_ubuf_stage2_tensor), (tl_ubuf_stage2_tensor),
                 (m_split + FLOAT_VECTOR_SIZE - 1) / FLOAT_VECTOR_SIZE,
                 1,
                 1,
@@ -1611,7 +1774,7 @@ private:
             );
             pipe_barrier(PIPE_V);
             __set_mask(cur_head_num);
-            vln(Ub<float>(rs_ubuf_stage2_tensor), Ub<float>(rs_ubuf_stage2_tensor),
+            vln((rs_ubuf_stage2_tensor), (rs_ubuf_stage2_tensor),
                 (cur_head_num + FLOAT_VECTOR_SIZE - 1) / FLOAT_VECTOR_SIZE,
                 1,
                 1,
@@ -1621,7 +1784,7 @@ private:
             pipe_barrier(PIPE_V);
 
             // logf(lse_sum) + lse_max
-            vadd(Ub<float>(ts_ubuf_stage2_tensor), Ub<float>(rs_ubuf_stage2_tensor), Ub<float>(lm_ubuf_stage2_tensor),
+            vadd((ts_ubuf_stage2_tensor), (rs_ubuf_stage2_tensor), (lm_ubuf_stage2_tensor),
                 (cur_head_num + FLOAT_VECTOR_SIZE - 1) / FLOAT_VECTOR_SIZE,
                 1,
                 1,
@@ -1639,7 +1802,7 @@ private:
             float log_sum = -(float)(*ts_ubuf_stage2_tensor);
             set_flag(PIPE_S, PIPE_V, EVENT_ID2);
             wait_flag(PIPE_S, PIPE_V, EVENT_ID2);
-            vadds(Ub<float>(gl_ubuf_stage2_tensor), Ub<float>(ll_ubuf_stage2_tensor), log_sum,
+            vadds((gl_ubuf_stage2_tensor), (ll_ubuf_stage2_tensor), log_sum,
                 (m_split + FLOAT_VECTOR_SIZE - 1) / FLOAT_VECTOR_SIZE,
                 1,
                 1,
@@ -1649,7 +1812,7 @@ private:
             pipe_barrier(PIPE_V);
 
             __set_mask(m_split);
-            vexp(Ub<float>(gl_ubuf_stage2_tensor), Ub<float>(gl_ubuf_stage2_tensor),
+            vexp((gl_ubuf_stage2_tensor), (gl_ubuf_stage2_tensor),
                 (m_split + FLOAT_VECTOR_SIZE - 1) / FLOAT_VECTOR_SIZE,
                 1,
                 1,
@@ -1658,7 +1821,7 @@ private:
             );
             pipe_barrier(PIPE_V);
             // msplit * 1 * embedding
-            pa_gm_to_ub_align<float>(
+            copy_gm_to_ubuf_align_b32(
                 lo_ubuf_stage2_tensor,
                 o_core_tmp_gm + (addr_o_offset + start_head * kv_split_core_num * __k0),
                 0,                                           // sid
@@ -1679,7 +1842,7 @@ private:
                 set_flag(PIPE_S, PIPE_V, EVENT_ID2);
                 wait_flag(PIPE_S, PIPE_V, EVENT_ID2);
 
-                vmuls(Ub<float>(to_ubuf_stage2_tensor), Ub<float>(lo_ubuf_stage2_tensor + (n_idx * roundk_8)), scale,
+                vmuls((to_ubuf_stage2_tensor), (lo_ubuf_stage2_tensor + (n_idx * roundk_8)), scale,
                 (roundk_64 + FLOAT_VECTOR_SIZE - 1) / FLOAT_VECTOR_SIZE,
                 1,
                 1,
@@ -1689,7 +1852,7 @@ private:
                 pipe_barrier(PIPE_V);
 
                 if (n_idx == 0){
-                    vadds(Ub<float>(go_ubuf_stage2_tensor), Ub<float>(to_ubuf_stage2_tensor), 0,
+                    vadds((go_ubuf_stage2_tensor), (to_ubuf_stage2_tensor), 0,
                 roundk_64 / FLOAT_VECTOR_SIZE,
                 1,
                 1,
@@ -1700,7 +1863,7 @@ private:
 
                 }
                 else{
-                    vadd(Ub<float>(go_ubuf_stage2_tensor), Ub<float>(to_ubuf_stage2_tensor), Ub<float>(go_ubuf_stage2_tensor),
+                    vadd((go_ubuf_stage2_tensor), (to_ubuf_stage2_tensor), (go_ubuf_stage2_tensor),
                 roundk_64 / FLOAT_VECTOR_SIZE,
                 1,
                 1,
@@ -1724,7 +1887,7 @@ private:
             pipe_barrier(PIPE_V);
             set_flag(PIPE_V, PIPE_MTE3, EVENT_ID1);
             wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID1);
-            pa_ub_to_gm_align<OUT_DTYPE>(
+            copy_ubuf_to_gm_align_b16(
                 o_gm + (addr_o_scalar + start_head * __k0),
                 go16_ubuf_stage2_tensor,
                 0,                       // sid
@@ -1751,7 +1914,7 @@ private:
     {
         uint32_t mask_repeat_stride = head_stride == 0 ? 0 : qk_round_n / FLOAT_BLOCK_SIZE;
         uint32_t mask_nburst = head_stride == 0 ? 1 : sub_m;
-        pa_gm_to_ub_align<OUT_DTYPE>(
+        copy_gm_to_ubuf_align_b16(
             mask_ubuf_tensor,
             mask_gm_tensor,
             0,                                 // sid
@@ -1777,7 +1940,7 @@ private:
         // *** ls = ls + mask
         if (qk_round_n  > FLOAT_BLOCK_SIZE * 255) {
             for (uint32_t vadd_idx = 0; vadd_idx < sub_m; ++vadd_idx){
-                vadd(Ub<float>(ls32_ubuf_tensor + (vadd_idx * qk_round_n)), Ub<float>(ls32_ubuf_tensor + (vadd_idx * qk_round_n)), Ub<float>(mask32_ubuf_tensor + (vadd_idx * mask_repeat_stride * FLOAT_BLOCK_SIZE)),
+                vadd((ls32_ubuf_tensor + (vadd_idx * qk_round_n)), (ls32_ubuf_tensor + (vadd_idx * qk_round_n)), (mask32_ubuf_tensor + (vadd_idx * mask_repeat_stride * FLOAT_BLOCK_SIZE)),
                 qk_n / FLOAT_VECTOR_SIZE,
                 1,
                 1,
@@ -1791,7 +1954,7 @@ private:
                 uint32_t offset = qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE;
                 __set_mask(qk_n % FLOAT_VECTOR_SIZE);
                 for (uint32_t vadd_idx = 0; vadd_idx < sub_m; ++vadd_idx) {
-                    vadd(Ub<float>(ls32_ubuf_tensor + (vadd_idx * qk_round_n + offset)), Ub<float>(ls32_ubuf_tensor + (vadd_idx * qk_round_n + offset)), Ub<float>(mask32_ubuf_tensor + (vadd_idx * qk_round_n + offset)),
+                    vadd((ls32_ubuf_tensor + (vadd_idx * qk_round_n + offset)), (ls32_ubuf_tensor + (vadd_idx * qk_round_n + offset)), (mask32_ubuf_tensor + (vadd_idx * qk_round_n + offset)),
                 1,
                 1,
                 1,
@@ -1805,7 +1968,7 @@ private:
             }
         } else {
             for (uint32_t vadd_idx = 0; vadd_idx < qk_n / FLOAT_VECTOR_SIZE; ++vadd_idx) {
-                vadd(Ub<float>(ls32_ubuf_tensor + (vadd_idx * FLOAT_VECTOR_SIZE)), Ub<float>(ls32_ubuf_tensor + (vadd_idx * FLOAT_VECTOR_SIZE)), Ub<float>(mask32_ubuf_tensor + (vadd_idx * FLOAT_VECTOR_SIZE)),
+                vadd((ls32_ubuf_tensor + (vadd_idx * FLOAT_VECTOR_SIZE)), (ls32_ubuf_tensor + (vadd_idx * FLOAT_VECTOR_SIZE)), (mask32_ubuf_tensor + (vadd_idx * FLOAT_VECTOR_SIZE)),
                 sub_m,
                 1,
                 1,
@@ -1817,7 +1980,7 @@ private:
             }
             if (qk_n % FLOAT_VECTOR_SIZE > 0) {
                 __set_mask(qk_n % FLOAT_VECTOR_SIZE);
-                vadd(Ub<float>(ls32_ubuf_tensor + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), Ub<float>(ls32_ubuf_tensor + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), Ub<float>(mask32_ubuf_tensor + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)),
+                vadd((ls32_ubuf_tensor + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), (ls32_ubuf_tensor + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), (mask32_ubuf_tensor + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)),
                 sub_m,
                 1,
                 1,
@@ -1843,7 +2006,7 @@ private:
     {
         if (qk_n <= FLOAT_VECTOR_SIZE) {
             __set_mask(qk_n);
-            vcmax(Ub<float>(dst), Ub<float>(src),
+            vcmax((dst), (src),
                 sub_m,
                 1,
                 1,
@@ -1851,7 +2014,7 @@ private:
                 static_cast<Order_t>(ORDER_ONLY_VALUE)
             );
         } else {
-            pa_ub_to_ub<float>(
+            copy_ubuf_to_ubuf(
                 tempTensor,
                 src,
                 0,                                             // sid
@@ -1862,7 +2025,7 @@ private:
             );
             pipe_barrier(PIPE_V);
             for (uint32_t rowmax_idx = 1; rowmax_idx < qk_n / FLOAT_VECTOR_SIZE; ++rowmax_idx) {
-                vmax(Ub<float>(tempTensor), Ub<float>(tempTensor), Ub<float>(src + (rowmax_idx * FLOAT_VECTOR_SIZE)),
+                vmax((tempTensor), (tempTensor), (src + (rowmax_idx * FLOAT_VECTOR_SIZE)),
                 sub_m,
                 1,
                 1,
@@ -1875,7 +2038,7 @@ private:
             }
             if (qk_n % FLOAT_VECTOR_SIZE > 0) {
                 __set_mask(qk_n % FLOAT_VECTOR_SIZE);
-                vmax(Ub<float>(tempTensor), Ub<float>(tempTensor), Ub<float>(src + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)),
+                vmax((tempTensor), (tempTensor), (src + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)),
                 sub_m,
                 1,
                 1,
@@ -1887,7 +2050,7 @@ private:
             }
             pipe_barrier(PIPE_V);
             set_vector_mask((uint64_t)-1, (uint64_t)-1);
-            vcmax(Ub<float>(dst), Ub<float>(tempTensor),
+            vcmax((dst), (tempTensor),
                 sub_m,
                 1,
                 1,
@@ -1908,7 +2071,7 @@ private:
     {
         if (qk_n <= FLOAT_VECTOR_SIZE) {
             __set_mask(qk_n);
-            vcadd(Ub<float>(dst), Ub<float>(src),
+            vcadd((dst), (src),
                 sub_m,
                 1,
                 1,
@@ -1918,7 +2081,7 @@ private:
             set_vector_mask((uint64_t)-1, (uint64_t)-1);
         } else {
             for (uint32_t rowsum_idx = 1; rowsum_idx < qk_n / FLOAT_VECTOR_SIZE; ++rowsum_idx) {
-                vadd(Ub<float>(src), Ub<float>(src), Ub<float>(src + (rowsum_idx * FLOAT_VECTOR_SIZE)),
+                vadd((src), (src), (src + (rowsum_idx * FLOAT_VECTOR_SIZE)),
                 sub_m,
                 1,
                 1,
@@ -1931,7 +2094,7 @@ private:
             }
             if (qk_n % FLOAT_VECTOR_SIZE > 0) {
                 __set_mask(qk_n % FLOAT_VECTOR_SIZE);
-                vadd(Ub<float>(src), Ub<float>(src), Ub<float>(src + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)),
+                vadd((src), (src), (src + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)),
                 sub_m,
                 1,
                 1,
@@ -1944,7 +2107,7 @@ private:
             }
             pipe_barrier(PIPE_V);
             
-            vcadd(Ub<float>(dst), Ub<float>(src),
+            vcadd((dst), (src),
                 sub_m,
                 1,
                 1,
@@ -1971,7 +2134,7 @@ private:
         );
         pipe_barrier(PIPE_V);
         for (uint32_t sub_v_idx = 0; sub_v_idx < qk_n / FLOAT_VECTOR_SIZE; ++sub_v_idx) {
-            vsub(Ub<float>(dst + (sub_v_idx * FLOAT_VECTOR_SIZE)), Ub<float>(src + (sub_v_idx * FLOAT_VECTOR_SIZE)), Ub<float>(tempMaxTensor),
+            vsub((dst + (sub_v_idx * FLOAT_VECTOR_SIZE)), (src + (sub_v_idx * FLOAT_VECTOR_SIZE)), (tempMaxTensor),
                 sub_m,
                 1,
                 1,
@@ -1983,7 +2146,7 @@ private:
         }
         if (qk_n % FLOAT_VECTOR_SIZE > 0) {
             __set_mask(qk_n % FLOAT_VECTOR_SIZE);
-            vsub(Ub<float>(dst + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), Ub<float>(src + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), Ub<float>(tempMaxTensor),
+            vsub((dst + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), (src + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), (tempMaxTensor),
                 sub_m,
                 1,
                 1,
@@ -2005,7 +2168,7 @@ private:
     {
         pipe_barrier(PIPE_V);
         for (uint32_t vadd_idx = 0; vadd_idx < qk_n / FLOAT_VECTOR_SIZE; ++vadd_idx) {
-            vdiv(Ub<float>(dst + (vadd_idx * FLOAT_VECTOR_SIZE)), Ub<float>(src + (vadd_idx * FLOAT_VECTOR_SIZE)), Ub<float>(src1),
+            vdiv((dst + (vadd_idx * FLOAT_VECTOR_SIZE)), (src + (vadd_idx * FLOAT_VECTOR_SIZE)), (src1),
                 sub_m,
                 1,
                 1,
@@ -2017,7 +2180,7 @@ private:
         }
         if (qk_n % FLOAT_VECTOR_SIZE > 0) {
             __set_mask(qk_n % FLOAT_VECTOR_SIZE);
-            vdiv(Ub<float>(dst + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), Ub<float>(src + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), Ub<float>(src1),
+            vdiv((dst + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), (src + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), (src1),
                 sub_m,
                 1,
                 1,
@@ -2039,7 +2202,7 @@ private:
     ) {
         pipe_barrier(PIPE_V);
         for (uint32_t vadd_idx = 0; vadd_idx < qk_n / FLOAT_VECTOR_SIZE; ++vadd_idx) {
-            vmul(Ub<float>(dst + (vadd_idx * FLOAT_VECTOR_SIZE)), Ub<float>(src + (vadd_idx * FLOAT_VECTOR_SIZE)), Ub<float>(src1),
+            vmul((dst + (vadd_idx * FLOAT_VECTOR_SIZE)), (src + (vadd_idx * FLOAT_VECTOR_SIZE)), (src1),
                 sub_m,
                 1,
                 1,
@@ -2051,7 +2214,7 @@ private:
         }
         if (qk_n % FLOAT_VECTOR_SIZE > 0) {
             __set_mask(qk_n % FLOAT_VECTOR_SIZE);
-            vmul(Ub<float>(dst + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), Ub<float>(src + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), Ub<float>(src1),
+            vmul((dst + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), (src + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), (src1),
                 sub_m,
                 1,
                 1,
@@ -2091,8 +2254,8 @@ private:
         uint32_t round_sub_m = (sub_m + 15) / 16 * 16;
         float quantMax = (float)1 / (float)127;
         wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID2);
-            pa_gm_to_ub<mm1CopyType>(
-                reinterpret_cast<__ubuf__ mm1CopyType *>(ls32_ubuf_tensor),
+            copy_gm_to_ubuf(
+                ls32_ubuf_tensor,
                 s_gm_tensor,
                 0,                        // sid
                 1,                        // nBurst
@@ -2106,7 +2269,7 @@ private:
         wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
 
         for (uint32_t vadd_idx = 0; vadd_idx < qk_n / FLOAT_VECTOR_SIZE; ++vadd_idx) {
-            vmuls(Ub<float>(ls32_ubuf_tensor + (vadd_idx * FLOAT_VECTOR_SIZE)), Ub<float>(ls32_ubuf_tensor + (vadd_idx * FLOAT_VECTOR_SIZE)), tor,
+            vmuls((ls32_ubuf_tensor + (vadd_idx * FLOAT_VECTOR_SIZE)), (ls32_ubuf_tensor + (vadd_idx * FLOAT_VECTOR_SIZE)), tor,
                 sub_m,
                 1,
                 1,
@@ -2116,7 +2279,7 @@ private:
         }
         if (qk_n % FLOAT_VECTOR_SIZE > 0) {
             __set_mask(qk_n % FLOAT_VECTOR_SIZE);
-            vmuls(Ub<float>(ls32_ubuf_tensor + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), Ub<float>(ls32_ubuf_tensor + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), tor,
+            vmuls((ls32_ubuf_tensor + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), (ls32_ubuf_tensor + (qk_n / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), tor,
                 sub_m,
                 1,
                 1,
@@ -2139,7 +2302,7 @@ private:
         ReduceMaxRepeatM(lm32_ubuf_tensor, ls32_ubuf_tensor, lp32_ubuf_tensor, sub_m, qk_n, qk_round_n);
         if (n_idx != 0) {
             // *** hm = vmax(lm, gm)
-            vmax(Ub<float>(hm32_ubuf_tensor), Ub<float>(lm32_ubuf_tensor), Ub<float>(gm32_ubuf_tensor),
+            vmax((hm32_ubuf_tensor), (lm32_ubuf_tensor), (gm32_ubuf_tensor),
                 sub_m_d64,
                 1,
                 1,
@@ -2150,7 +2313,7 @@ private:
             );
             pipe_barrier(PIPE_V);
             // *** dm = gm - hm
-            vsub(Ub<float>(dm32_ubuf_tensor), Ub<float>(gm32_ubuf_tensor), Ub<float>(hm32_ubuf_tensor),
+            vsub((dm32_ubuf_tensor), (gm32_ubuf_tensor), (hm32_ubuf_tensor),
                 sub_m_d64,
                 1,
                 1,
@@ -2162,7 +2325,7 @@ private:
             pipe_barrier(PIPE_V);
         } else {
             // *** hm = lm
-            pa_ub_to_ub<float>(
+            copy_ubuf_to_ubuf(
                 hm32_ubuf_tensor,
                 lm32_ubuf_tensor,
                 0,                         // sid
@@ -2174,7 +2337,7 @@ private:
             pipe_barrier(PIPE_V);
         }
         // *** gm = hm
-        pa_ub_to_ub<float>(
+        copy_ubuf_to_ubuf(
             gm32_ubuf_tensor,
             hm32_ubuf_tensor,
             0,                         // sid
@@ -2198,7 +2361,7 @@ private:
                            hm32_ubuf_tensor, tv32_ubuf_tensor,
                            sub_m, round_sub_m, qk_n, qk_round_n);
         // *** ls = exp(ls)
-        vexp(Ub<float>(ls32_ubuf_tensor), Ub<float>(ls32_ubuf_tensor),
+        vexp((ls32_ubuf_tensor), (ls32_ubuf_tensor),
                 (sub_m * qk_round_n + FLOAT_VECTOR_SIZE - 1) / FLOAT_VECTOR_SIZE,
                 1,
                 1,
@@ -2218,7 +2381,7 @@ private:
         pipe_barrier(PIPE_V);
         set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
         wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-        pa_ub_to_gm<IN_DTYPE>(
+        copy_ubuf_to_gm(
             p_gm_tensor,
             lp_ubuf_tensor,
             0,                        // sid
@@ -2256,7 +2419,7 @@ private:
         uint32_t round_sub_m = (sub_m + 15) / 16 * 16;
         uint32_t round_k =  RoundUp<16>(__k);
             wait_flag(PIPE_V, PIPE_MTE2, EVENT_ID0);
-            pa_gm_to_ub<mm2CopyType>(
+            copy_gm_to_ubuf(
                 lo_ubuf_tensor,
                 o_tmp_gm_ptr,
                 0,                    // sid
@@ -2272,7 +2435,7 @@ private:
         // *** 更新 L 和 O
         if (n_idx != 0) {
             // *** dm = exp(dm)
-            vexp(Ub<float>(dm32_ubuf_tensor), Ub<float>(dm32_ubuf_tensor),
+            vexp((dm32_ubuf_tensor), (dm32_ubuf_tensor),
                 sub_m_d64,
                 1,
                 1,
@@ -2281,7 +2444,7 @@ private:
             );
             pipe_barrier(PIPE_V);
             // *** gl = dm * gl
-            vmul(Ub<float>(gl32_ubuf_tensor), Ub<float>(dm32_ubuf_tensor), Ub<float>(gl32_ubuf_tensor),
+            vmul((gl32_ubuf_tensor), (dm32_ubuf_tensor), (gl32_ubuf_tensor),
                 sub_m_d64,
                 1,
                 1,
@@ -2292,7 +2455,7 @@ private:
             );
             pipe_barrier(PIPE_V);
             // *** gl = ll + gl
-            vadd(Ub<float>(gl32_ubuf_tensor), Ub<float>(gl32_ubuf_tensor), Ub<float>(ll_ubuf_tensor),
+            vadd((gl32_ubuf_tensor), (gl32_ubuf_tensor), (ll_ubuf_tensor),
                 sub_m_d64,
                 1,
                 1,
@@ -2315,7 +2478,7 @@ private:
             }
             // *** go = go * dm_block
             for (uint32_t vmul_idx = 0; vmul_idx < __k / FLOAT_VECTOR_SIZE; ++vmul_idx) {
-                vmul(Ub<float>(go32_ubuf_tensor + (vmul_idx * FLOAT_VECTOR_SIZE)), Ub<float>(go32_ubuf_tensor + (vmul_idx * FLOAT_VECTOR_SIZE)), Ub<float>(tv32_ubuf_tensor),
+                vmul((go32_ubuf_tensor + (vmul_idx * FLOAT_VECTOR_SIZE)), (go32_ubuf_tensor + (vmul_idx * FLOAT_VECTOR_SIZE)), (tv32_ubuf_tensor),
                 sub_m,
                 1,
                 1,
@@ -2327,7 +2490,7 @@ private:
             }
             if (__k % FLOAT_VECTOR_SIZE > 0) {
                 __set_mask(__k % FLOAT_VECTOR_SIZE);
-                vmul(Ub<float>(go32_ubuf_tensor + (__k / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), Ub<float>(go32_ubuf_tensor + (__k / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), Ub<float>(tv32_ubuf_tensor),
+                vmul((go32_ubuf_tensor + (__k / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), (go32_ubuf_tensor + (__k / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), (tv32_ubuf_tensor),
                 sub_m,
                 1,
                 1,
@@ -2340,7 +2503,7 @@ private:
             }
             pipe_barrier(PIPE_V);
             // *** go = lo + go
-            vadd(Ub<float>(go32_ubuf_tensor), Ub<float>(go32_ubuf_tensor), Ub<float>(lo_ubuf_tensor),
+            vadd((go32_ubuf_tensor), (go32_ubuf_tensor), (lo_ubuf_tensor),
                 (sub_m * round_k + FLOAT_VECTOR_SIZE - 1) / FLOAT_VECTOR_SIZE,
                 1,
                 1,
@@ -2352,7 +2515,7 @@ private:
             pipe_barrier(PIPE_V);
         } else {
             // *** gl = ll
-            pa_ub_to_ub<float>(
+            copy_ubuf_to_ubuf(
                 gl32_ubuf_tensor,
                 ll_ubuf_tensor,
                 0,                // sid
@@ -2367,7 +2530,7 @@ private:
                 go_flag_scalar = 0;
             }
             // *** go = lo
-            pa_ub_to_ub<float>(
+            copy_ubuf_to_ubuf(
                 go32_ubuf_tensor,
                 lo_ubuf_tensor,
                 0,                    // sid
@@ -2391,7 +2554,7 @@ private:
             pipe_barrier(PIPE_V);
             // *** go = go / gl_block
             for (uint32_t vdiv_idx = 0; vdiv_idx < __k / FLOAT_VECTOR_SIZE; ++vdiv_idx) {
-                vdiv(Ub<float>(go32_ubuf_tensor + (vdiv_idx * FLOAT_VECTOR_SIZE)), Ub<float>(go32_ubuf_tensor + (vdiv_idx * FLOAT_VECTOR_SIZE)), Ub<float>(tv32_ubuf_tensor),
+                vdiv((go32_ubuf_tensor + (vdiv_idx * FLOAT_VECTOR_SIZE)), (go32_ubuf_tensor + (vdiv_idx * FLOAT_VECTOR_SIZE)), (tv32_ubuf_tensor),
                 sub_m,
                 1,
                 1,
@@ -2403,7 +2566,7 @@ private:
             }
             if (__k % FLOAT_VECTOR_SIZE > 0) {
                 __set_mask(__k % FLOAT_VECTOR_SIZE);
-                vdiv(Ub<float>(go32_ubuf_tensor + (__k / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), Ub<float>(go32_ubuf_tensor + (__k / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), Ub<float>(tv32_ubuf_tensor),
+                vdiv((go32_ubuf_tensor + (__k / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), (go32_ubuf_tensor + (__k / FLOAT_VECTOR_SIZE * FLOAT_VECTOR_SIZE)), (tv32_ubuf_tensor),
                 sub_m,
                 1,
                 1,
@@ -2418,7 +2581,7 @@ private:
 
             if constexpr (SplitKV) {
                 // log（l）
-                    vln(Ub<float>(tv32_ubuf_tensor), Ub<float>(tv32_ubuf_tensor),
+                    vln((tv32_ubuf_tensor), (tv32_ubuf_tensor),
                 sub_m,
                 1,
                 1,
@@ -2433,7 +2596,7 @@ private:
         );
                     pipe_barrier(PIPE_V);
                     // logf(lse_sum) + lse_max
-                    vadd(Ub<float>(tv32_ubuf_tensor), Ub<float>(tv32_ubuf_tensor), Ub<float>(hm32_ubuf_tensor),
+                    vadd((tv32_ubuf_tensor), (tv32_ubuf_tensor), (hm32_ubuf_tensor),
                 sub_m,
                 1,
                 1,
@@ -2456,7 +2619,7 @@ private:
                 );
                 set_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
                 wait_flag(PIPE_V, PIPE_MTE3, EVENT_ID0);
-                pa_ub_to_gm_align<OUT_DTYPE>(
+                copy_ubuf_to_gm_align_b16(
                     o_gm + ((int64_t)o_offset),
                     go_ubuf_tensor,
                     0,        // sid
