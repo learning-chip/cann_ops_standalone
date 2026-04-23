@@ -1,81 +1,70 @@
 # Progress Report: `atb_pa_gqaonly_cce` Raw Intrinsic Port
 
-## Goal (completed)
+## Goal
 
-Create `/workdir/cann_ops_standalone/atb_pa_gqaonly_cce/` — a **raw-intrinsic** version of
-`/workdir/cann_ops_standalone/atb_pa_gqaonly/` that:
-
-- Uses **no** `AscendC::` namespace calls in compiled code (comments may reference AscendC for traceability).
-- Compiles with `bisheng` targeting `dav-c220`.
-- Passes all unit tests in `test_atb_pa_standalone.py` with `max_err ≤ 0.02`.
-- Delivers performance in line with the AscendC standalone build (same `pa_lib.so` benchmark script).
-
-Reference style: `/workdir/cann_ops_standalone/mla_prefill_cce/`.
+Single-source-style kernel build for paged attention: `paged_attention_mask_mix.cce` includes
+`paged_attention_decoder_nd_common.cce`, with shared helpers in `op_kernel/pa_kernel_inline.h` (raw
+`__gm__` / `__cbuf__` / `__ubuf__` / `__ca__` / `__cb__` / `__cc__` pointers, no `LocalTensorView` /
+`RawAddrTensorView`, thin wrappers inlined to intrinsics where appropriate).
 
 ---
 
 ## Current Status (2026-04-22)
 
-**Done.** Compilation succeeds. **All six fp16 unit tests pass.** Quick benchmark (`bench_pa_standalone.py --warmup 2 --iters 5`) shows timings within normal run-to-run variance vs `atb_pa_gqaonly`.
+**Done.** `bash compile.sh` succeeds. All six fp16 cases in `test_atb_pa_standalone.py` pass
+(`max_err` well under 0.02). `bench_pa_standalone.py` runs successfully.
 
-### Root cause of prior numerical failures
+The directory `kernels/utils/kernel` has been **removed** from this package; nothing in `compile.sh`
+or the `.cce` sources referenced it anymore.
 
-`ub_to_gm_align` in `kernels/utils/kernel/iterators/gm_to_ub_iterator.inc` incorrectly called
-`copy_ubuf_to_gm` with `lenBurst` / gaps intended for the **align** UB→GM path.
+---
 
-AscendC `DataCopyPad(GlobalTensor, LocalTensor, DataCopyExtParams)` maps to
-`DataCopyPadUB2GMImpl` → `copy_ubuf_to_gm_align_b8` / `b16` / `b32` with **block length in bytes**
-(see `/workdir/asc-devkit/impl/basic_api/dav_c220/kernel_operator_data_copy_impl.h`).
+## Correctness fixes (chronological)
 
-Using the non-align intrinsic misinterpreted transfer sizes and strides, corrupting GM writes
-(mask path, stage-2 output, `CopyScale`, etc.) → NaN for GQA and large errors for MHA.
+### UB→GM align dispatch (earlier port)
 
-**Fix:** Dispatch `ub_to_gm_align` to `copy_ubuf_to_gm_align_b8` / `b16` / `b32` by `sizeof(DType)`.
+`ub_to_gm_align` must use `copy_ubuf_to_gm_align_b8` / `b16` / `b32` (byte-oriented block lengths),
+not plain `copy_ubuf_to_gm`, or GM gets corrupted on padded paths.
 
-### Minor follow-up
+### L0C→GM base pointer (this session)
 
-- `load_cbuf_to_cb_transpose` calls in `paged_attention_decoder_nd_common.cce` use `(addr_cal_mode_t)0`
-  instead of bare `inc` for clarity (equivalent to `__cce_scalar::addr_cal_mode_t::inc`).
+`ProcessQK` / `ProcessPV` are called with **already-offset** GM bases (`s_gm + block/…`,
+`o_tmp_gm + block/…`). After the raw-pointer port, `pa_l0c_to_gm_nd_fp32` incorrectly used the
+class members `s_gm` / `o_tmp_gm` (root pointers), dropping the per-call offset. That wrote QK
+scores and partial outputs to the wrong GM region → large numerical errors.
+
+**Fix:** write with `s_gm_tensor + s_gm_offset` and `o_tmp_gm_tensor + o_temp_gm_offset`, matching
+the original `GlobalTensor` indexing on the parameter tensors.
 
 ---
 
 ## Verification commands
 
+Prefer a free device (see `npu-smi info`), e.g.:
+
 ```bash
 cd /workdir/cann_ops_standalone/atb_pa_gqaonly_cce
 bash compile.sh
-python test_atb_pa_standalone.py
-python bench_pa_standalone.py   # optional; add --warmup / --iters as needed
+ASCEND_DEVICE_ID=2 python3 test_atb_pa_standalone.py
+ASCEND_DEVICE_ID=2 python3 bench_pa_standalone.py
 ```
 
 ---
 
-## File map (unchanged architecture)
+## File map
 
 | Area | Path |
 |------|------|
-| Main kernels | `op_kernel/paged_attention_decoder_nd_common.cce`, `op_kernel/paged_attention_mask_mix.cce` |
-| Tensor views / buffer | `kernels/utils/kernel/mem.h` |
-| SIMD / MMA / utils / common | `kernels/utils/kernel/simd.h`, `mma.h`, `utils.h`, `common.h`, `hardware.h`, `layout.h` |
-| Iterators | `kernels/utils/kernel/iterator.h`, `kernels/utils/kernel/iterators/*.inc` |
+| Inlined helpers | `op_kernel/pa_kernel_inline.h` |
+| Cube + vec logic | `op_kernel/paged_attention_decoder_nd_common.cce` |
+| Entry + include decoder | `op_kernel/paged_attention_mask_mix.cce` |
+| Host launch | `paged_attention_wrapper.cpp`, `compile.sh` |
 
 ---
 
-## Todo list (all complete)
+## Maintenance notes
 
-- [x] Copy non-kernel scaffolding from `atb_pa_gqaonly` to `atb_pa_gqaonly_cce`
-- [x] Kernel utilities without `AscendC::`
-- [x] Iterator `.inc` files with raw intrinsics
-- [x] Convert `paged_attention_decoder_nd_common.cce`
-- [x] Compile with bisheng
-- [x] Fix correctness (`ub_to_gm_align` → align intrinsics)
-- [x] All unit tests pass
-- [x] Performance sanity vs AscendC build (same bench script; variance expected)
-
----
-
-## Note for future maintenance
-
-When porting UB↔GM “pad” / “align” AscendC APIs, always match the **exact** underlying intrinsic from
-`kernel_operator_data_copy_impl.h` (`copy_*_align_*` vs plain `copy_*`), including **byte** vs
-**block** length conventions for each intrinsic family.
+- When porting UB↔GM pad/align AscendC APIs, match the **exact** intrinsic family
+  (`copy_*_align_*` vs `copy_*`) and byte vs element length conventions.
+- When a kernel function takes a sliced `__gm__ *` base, all GM writes inside that function must use
+  that parameter, not a separate global “root” pointer, unless the offset is reapplied consistently.
